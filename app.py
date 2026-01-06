@@ -69,13 +69,13 @@ def translate_text(text, dest_lang):
         return GoogleTranslator(source='auto', target=dest_lang).translate(text)
     except: return text
 
-def update_header_color(worksheet, color_type):
+def update_header_color(worksheet, color_type, header_length):
     """משנה את צבע הרקע של הכותרת (שורה 1)"""
     # אדום בהיר: {'red': 1.0, 'green': 0.8, 'blue': 0.8}
     # ירוק בהיר: {'red': 0.8, 'green': 1.0, 'blue': 0.8}
     color = {'red': 1.0, 'green': 0.8, 'blue': 0.8} if color_type == "red" else {'red': 0.8, 'green': 1.0, 'blue': 0.8}
     try:
-        worksheet.format("A1:E1", {
+        worksheet.format(f"A1:{header_length}1", {
             "backgroundColor": color,
             "textFormat": {"bold": True}
         })
@@ -152,18 +152,6 @@ def scrape_single_site(site_data, keywords):
     
     return found, status, row_idx
 
-def update_header_color(worksheet, color_type):
-    """משנה את צבע הרקע של הכותרת (שורה 1)"""
-    # אדום בהיר: {'red': 1.0, 'green': 0.8, 'blue': 0.8}
-    # ירוק בהיר: {'red': 0.8, 'green': 1.0, 'blue': 0.8}
-    color = {'red': 1.0, 'green': 0.8, 'blue': 0.8} if color_type == "red" else {'red': 0.8, 'green': 1.0, 'blue': 0.8}
-    try:
-        worksheet.format("A1:E1", {
-            "backgroundColor": color,
-            "textFormat": {"bold": True}
-        })
-    except Exception as e:
-        print(f"Color formatting error: {e}")
 
 def background_process():
     print("Starting background process...")
@@ -175,9 +163,9 @@ def background_process():
     ws_log = sh.worksheet("תוצאות החיפוש")
 
     # שינוי צבע לאדום בהיר (ריצה התחילה)
-    update_header_color(ws_kwd, "red")
-    update_header_color(ws_sites, "red")
-    update_header_color(ws_log, "red")
+    update_header_color(ws_kwd, "red", "B")
+    update_header_color(ws_sites, "red", "B")
+    update_header_color(ws_log, "red", "E")
 
     # --- 1. טיפול במילות מפתח ---
     k_vals = ws_kwd.get_all_values()
@@ -282,10 +270,10 @@ def background_process():
         send_notification(f"מילות המפתח שנמצאו: {found_kws}")
 
     # סיום: שינוי צבע לירוק בהיר
-    update_header_color(ws_kwd, "green")
-    update_header_color(ws_sites, "green")
-    update_header_color(ws_log, "green")
-    
+    update_header_color(ws_kwd, "green", "B")
+    update_header_color(ws_sites, "green", "B")
+    update_header_color(ws_log, "green", "E")
+
     print("Background process finished.")
 
 @app.route('/run-tasks')
