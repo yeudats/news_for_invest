@@ -14,7 +14,7 @@ An autonomous bot that scans financial news sites (local and global) based on cu
 The bot expects a Google Sheet named `news_for_invest` with the following tabs:
 1. **אתרים לחיפוש** (Sites to Search): Column A - Website URLs (e.g., ynet, Globes, etc.).
 2. **מילות מפתח** (Keywords): Column A - Hebrew, Column B - English (The bot fills missing translations).
-3. **Stock News Log**: The results sheet (Date, Keyword, URL, Site, Title).
+3. **תוצאות החיפוש**: The results sheet (Date, Keyword, URL, Site, Title).
 
 ## ⚙️ Installation & Local Setup
 

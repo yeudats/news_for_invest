@@ -233,6 +233,15 @@ def background_process():
 
     # --- 4. מיון ובניית הגליון (לפי בקשתך) ---
     if all_articles:
+
+        # תרגום כותרות לכתבות שנמצאו (רק אם הן באנגלית)
+        translator = GoogleTranslator(source='en', target='iw')
+        for art in all_articles:
+            if any(c.isalpha() and c.isascii() for c in art['Title']):
+                try: art['Title'] = translator.translate(art['Title'])
+                except: pass
+
+                
         df = pd.DataFrame(all_articles).drop_duplicates(subset=['Article URL'])
         
         # פונקציית עזר לדירוג עדיפות אתר
