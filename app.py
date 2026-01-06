@@ -13,6 +13,7 @@ from urllib.parse import quote, urljoin
 from flask import Flask
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import base64
 
 app = Flask(__name__)
 
@@ -29,18 +30,29 @@ HEADERS = {
 
 def send_notification(message):
     try:
-        safe_title = quote("כתבות חדשות") 
         url = f"https://ntfy.sh/{NTFY_TOPIC}"
         
+        # פתרון לעברית בכותרת: קידוד Base64 לפי תקן RFC 2047
+        # זה גורם לטלפון לפענח את זה כטקסט רגיל בעברית
+        title = "כתבות חדשות"
+        encoded_title = f"=?utf-8?b?{base64.b64encode(title.encode('utf-8')).decode('utf-8')}?="
+        
         headers = {
-            "Title": safe_title,
+            "Title": encoded_title,
             "Click": SHEET_LINK,
-            "Tags": "chart_with_upwards_trend,newspaper",
-            "Priority": "default"
+            "Tags": "newspaper", # הורדתי את הגרף המודגש
+            "Priority": "2"      # עדיפות נמוכה (Low) הופכת את ההודעה לפחות "צועקת" ומודגשת
         }
         
-        # גוף ההודעה חייב להיות מקודד ל-utf-8
-        requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=5)
+        # שליחת ההודעה
+        response = requests.post(
+            url, 
+            data=message.encode('utf-8'), 
+            headers=headers, 
+            timeout=10
+        )
+        print(f"Notification sent! Status: {response.status_code}")
+        
     except Exception as e:
         print(f"Notification Error: {e}")
 
@@ -241,7 +253,7 @@ def background_process():
                 try: art['Title'] = translator.translate(art['Title'])
                 except: pass
 
-                
+
         df = pd.DataFrame(all_articles).drop_duplicates(subset=['Article URL'])
         
         # פונקציית עזר לדירוג עדיפות אתר
