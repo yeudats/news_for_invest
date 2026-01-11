@@ -9,8 +9,8 @@ import feedparser
 from deep_translator import GoogleTranslator
 import pandas as pd
 from datetime import datetime
-import pytz  # ספרייה לניהול אזורי זמן
-from urllib.parse import quote, urljoin
+import pytz
+from urllib.parse import quote, urljoin, urlparse
 from flask import Flask
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -27,50 +27,54 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
 }
 
-# הגדרת אזור זמן לישראל
 IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
 
 # --- פונקציות עזר ---
 
 def get_il_time():
-    """מחזיר מחרוזת זמן נוכחי בישראל"""
     return datetime.now(IL_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+
+def normalize_url(url):
+    """
+    מנקה את הכתובת כדי למנוע כפילויות.
+    מסיר פרמטרים (אחרי סימן שאלה) ומסיר http/www כדי להשוות נטו את הכתובת.
+    """
+    if not url: return ""
+    try:
+        parsed = urlparse(url)
+        # בניית הכתובת מחדש ללא query parameters
+        clean = f"{parsed.netloc}{parsed.path}"
+        # הסרת קידומות נפוצות לנרמול
+        clean = clean.lower().replace("www.", "").replace("https://", "").replace("http://", "")
+        # הסרת לוכסן בסוף אם יש
+        if clean.endswith('/'): clean = clean[:-1]
+        return clean
+    except:
+        return url
 
 def send_notification(message):
     try:
         url = f"https://ntfy.sh/{NTFY_TOPIC}"
-        
         title = "כתבות חדשות"
         encoded_title = f"=?utf-8?b?{base64.b64encode(title.encode('utf-8')).decode('utf-8')}?="
-        
         headers = {
             "Title": encoded_title,
             "Click": SHEET_LINK,
             "Tags": "newspaper",
-            "Priority": "3" # החזרתי לדיפולט (או 2 אם אתה מעדיף שקט)
+            "Priority": "3"
         }
-        
-        response = requests.post(
-            url, 
-            data=message.encode('utf-8'), 
-            headers=headers, 
-            timeout=10
-        )
-        print(f"Notification sent! Status: {response.status_code}")
-        
+        requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=10)
     except Exception as e:
         print(f"Notification Error: {e}")
 
 def get_sheet_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_json = os.environ.get("GOOGLE_CREDS_JSON")
-    
     if creds_json:
         info = json.loads(creds_json)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(info, scope)
     else:
         creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-        
     return gspread.authorize(creds)
 
 def contains_hebrew(text):
@@ -79,12 +83,8 @@ def contains_hebrew(text):
 def update_header_color(worksheet, color_type, header_length):
     color = {'red': 1.0, 'green': 0.8, 'blue': 0.8} if color_type == "red" else {'red': 0.8, 'green': 1.0, 'blue': 0.8}
     try:
-        worksheet.format(f"A1:{header_length}1", {
-            "backgroundColor": color,
-            "textFormat": {"bold": True}
-        })
-    except Exception as e:
-        print(f"Color formatting error: {e}")
+        worksheet.format(f"A1:{header_length}1", {"backgroundColor": color, "textFormat": {"bold": True}})
+    except: pass
 
 def check_keyword_in_article_body(article_url, keywords):
     try:
@@ -101,9 +101,9 @@ def scrape_single_site(site_data, keywords):
     url, row_idx = site_data
     found = []
     status = "OK"
-    
     try:
         rss_url = url
+        # רשימת RSS מהירה
         if not "xml" in url and not "rss" in url:
             if "ynet" in url: rss_url = "https://www.ynet.co.il/Integration/StoryRss2.xml"
             elif "globes" in url: rss_url = "https://www.globes.co.il/webservice/rss/rss.aspx?BID=2"
@@ -112,9 +112,7 @@ def scrape_single_site(site_data, keywords):
             elif "bizportal" in url: rss_url = "https://www.bizportal.co.il/forumpages/rss/general"
 
         response = requests.get(rss_url, headers=HEADERS, timeout=10)
-        
-        if response.status_code in [403, 401]:
-            return [], "Blocked", row_idx
+        if response.status_code in [403, 401]: return [], "Blocked", row_idx
 
         current_time_str = get_il_time()
 
@@ -127,11 +125,8 @@ def scrape_single_site(site_data, keywords):
                     if (he and he.lower() in t.lower()) or (en and en.lower() in t.lower()):
                         match, kw = True, (he if he else en); break
                 if not match: match, kw = check_keyword_in_article_body(l, keywords)
-                
                 if match:
-                    found.append({'Date': current_time_str, 
-                                  'Keyword': kw, 'Article URL': l, 'Site URL': url, 'Title': t})
-        
+                    found.append({'Date': current_time_str, 'Keyword': kw, 'Article URL': l, 'Site URL': url, 'Title': t})
         else:
             soup = BeautifulSoup(response.content, 'html.parser')
             links = soup.find_all('a', href=True)[:30]
@@ -141,12 +136,9 @@ def scrape_single_site(site_data, keywords):
                 if len(t) < 5: continue
                 match, kw = check_keyword_in_article_body(l, keywords)
                 if match:
-                    found.append({'Date': current_time_str, 
-                                  'Keyword': kw, 'Article URL': l, 'Site URL': url, 'Title': t})
-                    
+                    found.append({'Date': current_time_str, 'Keyword': kw, 'Article URL': l, 'Site URL': url, 'Title': t})
     except Exception as e:
         status = f"Error: {str(e)[:10]}"
-    
     return found, status, row_idx
 
 def background_process():
@@ -162,43 +154,32 @@ def background_process():
     update_header_color(ws_sites, "red", "B")
     update_header_color(ws_log, "red", "E")
 
-    # --- 1. קריאת היסטוריה (כדי לשמור על כתבות ישנות) ---
+    # --- 1. טעינת היסטוריה (כתבות ישנות) ---
     existing_data = ws_log.get_all_values()
     df_old = pd.DataFrame()
-    
-    # מיפוי עמודות עברית לאנגלית לעבודה פנימית
-    col_map = {
-        "תאריך ושעה": "Date",
-        "מילת מפתח": "Keyword",
-        "קישור לכתבה": "Article URL",
-        "קישור לאתר": "Site URL",
-        "כותרת": "Title"
-    }
+    col_map = {"תאריך ושעה": "Date", "מילת מפתח": "Keyword", "קישור לכתבה": "Article URL", "קישור לאתר": "Site URL", "כותרת": "Title"}
     
     if len(existing_data) > 1:
-        # לוקחים את הכותרות מהשורה הראשונה ואת הדאטה מהשאר
         headers_row = existing_data[0]
-        data_rows = existing_data[1:]
-        
-        # סינון שורות ריקות (כמו הרווחים שאנחנו מוסיפים)
-        cleaned_rows = [r for r in data_rows if r and r[2]] # בודק שיש לינק
-        
-        if cleaned_rows:
-            temp_df = pd.DataFrame(cleaned_rows, columns=headers_row)
-            # שינוי שמות עמודות לאנגלית לצורך עיבוד
-            temp_df = temp_df.rename(columns=col_map)
-            # שומרים רק את העמודות הרלוונטיות
-            needed_cols = list(col_map.values())
-            # מוודאים שכל העמודות קיימות (למקרה של שינויים ידניים)
-            if all(col in temp_df.columns for col in needed_cols):
-                df_old = temp_df[needed_cols]
+        data_rows = [r for r in existing_data[1:] if r and len(r) > 2 and r[2]] # סינון שורות ריקות
+        if data_rows:
+            temp_df = pd.DataFrame(data_rows, columns=headers_row).rename(columns=col_map)
+            # בחירת רק העמודות הרלוונטיות למקרה של סטיות
+            needed = list(col_map.values())
+            if all(c in temp_df.columns for c in needed):
+                df_old = temp_df[needed].copy()
+                # יצירת עמודת נרמול להשוואה
+                df_old['normalized_url'] = df_old['Article URL'].apply(normalize_url)
 
-    # --- 2. מילות מפתח ---
+    # רשימת כתובות שכבר קיימות בהיסטוריה (לצורך סימון "לא חדש")
+    old_urls_set = set(df_old['normalized_url'].tolist()) if not df_old.empty else set()
+
+    # --- 2. עדכון מילות מפתח ---
     k_vals = ws_kwd.get_all_values()
     keywords = []
     updates = []
-    translator_to_en = GoogleTranslator(source='auto', target='en')
-    translator_to_he = GoogleTranslator(source='auto', target='iw')
+    trans_en = GoogleTranslator(source='auto', target='en')
+    trans_he = GoogleTranslator(source='auto', target='iw')
 
     for i, row in enumerate(k_vals[1:], 2):
         val_a = row[0].strip() if len(row) > 0 else ""
@@ -212,11 +193,10 @@ def background_process():
         if contains_hebrew(val_b): final_he = val_b
         elif val_b: final_en = val_b
             
-        if final_he and not final_en:
-            final_en = translator_to_en.translate(final_he)
+        if final_he and not final_en: final_en = trans_en.translate(final_he)
         elif final_en and not final_he:
-            translated = translator_to_he.translate(final_en)
-            final_he = translated if translated.lower() != final_en.lower() else final_en
+            t = trans_he.translate(final_en)
+            final_he = t if t.lower() != final_en.lower() else final_en
 
         keywords.append((final_he, final_en))
         if val_a != final_he or val_b != final_en:
@@ -225,125 +205,124 @@ def background_process():
     if updates: ws_kwd.batch_update(updates)
 
     # --- 3. סריקה חדשה ---
-    new_articles_list = []
+    new_articles = []
     priority_sites = [r[0] for r in ws_sites.get_all_values()[1:] if r and r[0].startswith('http')]
     sites_data = [(url, i) for i, url in enumerate(priority_sites, 2)]
     
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(scrape_single_site, s, keywords): s for s in sites_data}
         for future in as_completed(futures):
-            arts, status, row_idx = future.result()
-            new_articles_list.extend(arts)
+            arts, _, _ = future.result()
+            new_articles.extend(arts)
 
     # Google News
-    current_time_str = get_il_time()
-    for loc in [{'l': 'en', 'g': 'US', 'c': 'US:en', 'label': 'Global News'}, 
-                {'l': 'he', 'g': 'IL', 'c': 'IL:he', 'label': 'Local News'}]:
+    cur_time = get_il_time()
+    for loc in [{'l': 'en', 'g': 'US', 'c': 'US:en', 'lbl': 'Global News'}, 
+                {'l': 'he', 'g': 'IL', 'c': 'IL:he', 'lbl': 'Local News'}]:
         for he, en in keywords:
             q = en if loc['l'] == 'en' else he
             try:
                 rss = f"https://news.google.com/rss/search?q={quote(q)}&hl={loc['l']}&gl={loc['g']}&ceid={loc['c']}"
                 feed = feedparser.parse(rss)
                 for entry in feed.entries[:10]:
-                    new_articles_list.append({
-                        'Date': current_time_str,
-                        'Keyword': he if he else en,
-                        'Article URL': entry.link,
-                        'Site URL': loc['label'],
-                        'Title': entry.title
+                    new_articles.append({
+                        'Date': cur_time, 'Keyword': he if he else en,
+                        'Article URL': entry.link, 'Site URL': loc['lbl'], 'Title': entry.title
                     })
             except: pass
 
-    # --- 4. עיבוד ומיזוג נתונים ---
+    # --- 4. עיבוד ומיון סופי ---
+    df_new = pd.DataFrame(new_articles)
     
-    # אם יש כתבות חדשות, נתרגם כותרות
-    if new_articles_list:
-        translator = GoogleTranslator(source='en', target='iw')
-        for art in new_articles_list:
-             if any(c.isalpha() and c.isascii() for c in art['Title']):
-                try: art['Title'] = translator.translate(art['Title'])
-                except: pass
-
-    df_new = pd.DataFrame(new_articles_list)
-    
-    # בדיקה מה באמת חדש (לצורך התראה)
-    truly_new_keywords = set()
     if not df_new.empty:
-        # אם אין היסטוריה בכלל, הכל חדש
-        if df_old.empty:
-            truly_new_keywords = set(df_new['Keyword'].unique())
-        else:
-            # מציאת כתבות שה-URL שלהן לא נמצא ב-Old
-            existing_urls = set(df_old['Article URL'])
-            new_items_df = df_new[~df_new['Article URL'].isin(existing_urls)]
-            truly_new_keywords = set(new_items_df['Keyword'].unique())
+        # תרגום כותרות
+        translator = GoogleTranslator(source='en', target='iw')
+        for idx, row in df_new.iterrows():
+             if any(c.isalpha() and c.isascii() for c in row['Title']):
+                try: df_new.at[idx, 'Title'] = translator.translate(row['Title'])
+                except: pass
+        
+        # הוספת עמודת נרמול לחדשים
+        df_new['normalized_url'] = df_new['Article URL'].apply(normalize_url)
 
-    # מיזוג: חדש + ישן
-    df_combined = pd.concat([df_new, df_old]) if not df_old.empty else df_new
+    # איחוד כל הנתונים (חדש + ישן)
+    df_combined = pd.concat([df_new, df_old], ignore_index=True) if not df_old.empty else df_new
     
     if not df_combined.empty:
-        # הסרת כפילויות לפי URL (נשמור את העדכן ביותר אם יש חפיפה, למרות ש-URL זהה לא אמור להשתנות)
-        df_combined = df_combined.drop_duplicates(subset=['Article URL'], keep='first')
+        # הסרת כפילויות לפי הכתובת המנורמלת
+        # אנו ממיינים קודם כדי לוודא שאם יש כפילות, נשמור את הגרסה שסימנו לה תאריך עדכני (למרות שזה לא קריטי אם זה אותו לינק)
+        df_combined = df_combined.drop_duplicates(subset=['normalized_url'], keep='first')
+
+        # --- לוגיקת המיון המתקדמת ---
         
-        # פונקציית עדיפות
-        def get_site_priority(row):
-            url = row['Article URL']
+        def calculate_priority(row):
+            norm_url = row['normalized_url']
+            url_full = row['Article URL']
             site_label = row['Site URL']
-            if any(ps in url for ps in priority_sites): return 1
-            if site_label == 'Global News': return 2
-            return 3
+            
+            # בדיקה: האם זו כתבה שקיימת בהיסטוריה?
+            # אם היא הייתה ב-old_urls_set, היא נחשבת ישנה (Priority 4), גם אם מצאנו אותה שוב עכשיו.
+            is_history = norm_url in old_urls_set
+            
+            if is_history:
+                return 4 # כתבות ישנות לתחתית
+            
+            # אם זו כתבה חדשה באמת (לא בהיסטוריה):
+            if any(ps in url_full for ps in priority_sites): return 1 # אתרי משתמש
+            if site_label == 'Global News': return 2 # חו"ל
+            return 3 # הארץ (או כל ברירת מחדל אחרת לחדש)
 
-        df_combined['Priority'] = df_combined.apply(get_site_priority, axis=1)
-        
-        # מיון: קודם לפי מילת מפתח, אחר כך עדיפות אתר, אחר כך תאריך (הכי חדש למעלה)
-        # שים לב: המיון הוא קריטי כדי שה-head(20) יקח את הכי רלוונטיים/חדשים
-        df_combined = df_combined.sort_values(by=['Keyword', 'Priority', 'Date'], ascending=[True, True, False])
+        df_combined['Sort_Priority'] = df_combined.apply(calculate_priority, axis=1)
 
-        # בניית הרשימה הסופית
-        # שינוי שמות עמודות חזרה לעברית
-        rev_col_map = {v: k for k, v in col_map.items()}
-        final_rows = [list(col_map.keys())] # כותרות
-        
-        grouped = df_combined.groupby('Keyword')
+        # מיון:
+        # 1. לפי מילת מפתח
+        # 2. לפי עדיפות (1,2,3 - חדשים למעלה, 4 - ישנים למטה)
+        # 3. בתוך כל קבוצה - לפי תאריך (החדש ביותר ראשון)
+        df_combined = df_combined.sort_values(
+            by=['Keyword', 'Sort_Priority', 'Date'], 
+            ascending=[True, True, False]
+        )
+
+        # בניית הגליון הסופי (עד 20 תוצאות)
+        final_rows = [["תאריך ושעה", "מילת מפתח", "קישור לכתבה", "קישור לאתר", "כותרת"]]
+        truly_new_keywords = set()
+
+        grouped = df_combined.groupby('Keyword', sort=False) # sort=False שומר על סדר המיון שעשינו למעלה
         for kw, group in grouped:
-            # לוקחים עד 20 כתבות לכל מילת מפתח (שילוב של חדש וישן)
             top_20 = group.head(20)
             
+            # בדיקה עבור התראה: האם ב-20 הכתבות המוצגות יש משהו חדש באמת?
+            # משהו חדש = Priority פחות מ-4 (כלומר 1, 2 או 3)
+            if any(top_20['Sort_Priority'] < 4):
+                truly_new_keywords.add(kw)
+
             for _, row in top_20.iterrows():
                 final_rows.append([
-                    row['Date'], 
-                    row['Keyword'], 
-                    row['Article URL'], 
-                    row['Site URL'], 
-                    row['Title']
+                    row['Date'], row['Keyword'], row['Article URL'], row['Site URL'], row['Title']
                 ])
             
-            # רווחים
             final_rows.append([""] * 5)
             final_rows.append([""] * 5)
 
-        # כתיבה לגליון
         ws_log.clear()
         ws_log.update(final_rows)
         
-        # שליחת התראה רק על מה שבאמת חדש
         if truly_new_keywords:
-            found_kws = ", ".join(list(truly_new_keywords))
-            send_notification(f"נמצאו כתבות חדשות עבור: {found_kws}")
+            kws_str = ", ".join(list(truly_new_keywords))
+            send_notification(f"כתבות חדשות עבור: {kws_str}")
         else:
-            print("No truly new articles found, skipping notification.")
+            print("No truly new articles (priority 1-3) found.")
 
     update_header_color(ws_kwd, "green", "B")
     update_header_color(ws_sites, "green", "B")
     update_header_color(ws_log, "green", "E")
-
-    print("Background process finished.")
+    print("Done.")
 
 @app.route('/run-tasks')
 def trigger_bot():
     thread = threading.Thread(target=background_process)
     thread.start()
-    return "Job Started in Background", 200
+    return "Job Started", 200
 
 @app.route('/')
 def home(): return "Bot is Alive", 200
