@@ -35,32 +35,44 @@ IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
 def get_il_time():
     return datetime.now(IL_TIMEZONE).strftime("%Y-%m-%d %H:%M")
 
-def extract_site_name(url):
+def extract_site_name(url, title=None, is_google_news=False):
     """
-    מחלץ את שם האתר הנקי מתוך הקישור.
-    למשל: https://www.globes.co.il/news/... -> globes.co.il
+    מחלץ שם אתר קריא.
+    אם זה גוגל ניוז - מנסה לחלץ את השם מתוך הכותרת (למשל ' - גלצ').
+    אחרת - מחלץ דומיין נקי.
     """
+    # 1. טיפול מיוחד ל-Google News (חילוץ מתוך הכותרת)
+    if is_google_news and title:
+        # בדרך כלל הפורמט הוא: "כותרת הכתבה - שם המקור"
+        parts = title.rsplit(' - ', 1)
+        if len(parts) > 1:
+            return parts[1].strip() # מחזיר "גלצ" או "ynet"
+    
+    # 2. חילוץ רגיל לדומיין
     try:
         parsed = urlparse(url)
         domain = parsed.netloc
-        # הסרת www.
         if domain.startswith("www."):
             domain = domain[4:]
         return domain
     except:
         return "Unknown Source"
 
+def clean_title_google_news(title):
+    """
+    מנקה את שם המקור מהכותרת כדי שלא יופיע פעמיים
+    """
+    parts = title.rsplit(' - ', 1)
+    if len(parts) > 1:
+        return parts[0].strip()
+    return title
+
 def normalize_url(url):
-    """
-    ניקוי אגרסיבי של הכתובת להשוואה
-    """
     if not url: return ""
     try:
         parsed = urlparse(url)
-        # שימוש רק ב-netloc וב-path, התעלמות מ-http/https ומ-query parameters
         clean = f"{parsed.netloc}{parsed.path}"
         clean = clean.lower().replace("www.", "").replace("https://", "").replace("http://", "")
-        # הסרת סלש בסוף
         if clean.endswith('/'): clean = clean[:-1]
         return clean
     except:
@@ -127,7 +139,6 @@ def scrape_single_site(site_data, keywords):
         response = requests.get(rss_url, headers=HEADERS, timeout=10)
         if response.status_code in [403, 401]: return [], "Blocked", row_idx
 
-        # כאן אנחנו לא קובעים תאריך סופי, זה יטופל בשלב המיזוג
         current_time_str = get_il_time()
 
         if "xml" in response.headers.get('Content-Type', '') or rss_url.endswith('xml'):
@@ -140,13 +151,15 @@ def scrape_single_site(site_data, keywords):
                         match, kw = True, (he if he else en); break
                 if not match: match, kw = check_keyword_in_article_body(l, keywords)
                 if match:
+                    # שימוש בפונקציה הרגילה (לא גוגל ניוז)
+                    site_name = extract_site_name(url)
                     found.append({
-                        'Date': current_time_str, # זמני
+                        'Date': current_time_str,
                         'Keyword': kw, 
                         'Article URL': l, 
-                        'Site URL': extract_site_name(l), # שימוש בפונקציה החדשה
+                        'Site URL': site_name, 
                         'Title': t,
-                        'Is_User_Site': True # סימון פנימי
+                        'Is_User_Site': True
                     })
         else:
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -157,11 +170,12 @@ def scrape_single_site(site_data, keywords):
                 if len(t) < 5: continue
                 match, kw = check_keyword_in_article_body(l, keywords)
                 if match:
+                    site_name = extract_site_name(url)
                     found.append({
                         'Date': current_time_str, 
                         'Keyword': kw, 
                         'Article URL': l, 
-                        'Site URL': extract_site_name(l), 
+                        'Site URL': site_name, 
                         'Title': t,
                         'Is_User_Site': True
                     })
@@ -182,28 +196,25 @@ def background_process():
     update_header_color(ws_sites, "red", "B")
     update_header_color(ws_log, "red", "E")
 
-    # --- 1. טעינת היסטוריה ומיפוי תאריכים מקוריים ---
+    # --- 1. טעינת היסטוריה ---
     existing_data = ws_log.get_all_values()
     df_old = pd.DataFrame()
     col_map = {"תאריך ושעה": "Date", "מילת מפתח": "Keyword", "קישור לכתבה": "Article URL", "שם האתר": "Site URL", "כותרת": "Title"}
-    
-    # מילון לשמירת התאריך המקורי של כל לינק
     url_to_original_date = {} 
-    
+
     if len(existing_data) > 1:
         headers_row = existing_data[0]
-        # התאמת שם העמודה הרביעית אם השתנה בגליון
-        if headers_row[3] == "קישור לאתר": headers_row[3] = "שם האתר"
+        # התאמת כותרת דינמית
+        if len(headers_row) > 3: headers_row[3] = "שם האתר"
         
         data_rows = [r for r in existing_data[1:] if r and len(r) > 2 and r[2]]
         if data_rows:
             temp_df = pd.DataFrame(data_rows, columns=headers_row).rename(columns=col_map)
             needed = list(col_map.values())
+            # בדיקה גמישה אם העמודות קיימות
             if all(c in temp_df.columns for c in needed):
                 df_old = temp_df[needed].copy()
                 df_old['normalized_url'] = df_old['Article URL'].apply(normalize_url)
-                
-                # מילוי המילון: נורמל_לינק -> תאריך_מקורי
                 for _, row in df_old.iterrows():
                     url_to_original_date[row['normalized_url']] = row['Date']
 
@@ -226,7 +237,6 @@ def background_process():
         elif val_a: final_en = val_a
         if contains_hebrew(val_b): final_he = val_b
         elif val_b: final_en = val_b
-            
         if final_he and not final_en: final_en = trans_en.translate(final_he)
         elif final_en and not final_he:
             t = trans_he.translate(final_en)
@@ -235,7 +245,6 @@ def background_process():
         keywords.append((final_he, final_en))
         if val_a != final_he or val_b != final_en:
             updates.append({'range': f'A{i}:B{i}', 'values': [[final_he, final_en]]})
-
     if updates: ws_kwd.batch_update(updates)
 
     # --- 3. סריקה חדשה ---
@@ -249,7 +258,7 @@ def background_process():
             arts, _, _ = future.result()
             new_articles.extend(arts)
 
-    # Google News
+    # Google News Loop
     cur_time = get_il_time()
     for loc in [{'l': 'en', 'g': 'US', 'c': 'US:en', 'lbl': 'Global'}, 
                 {'l': 'he', 'g': 'IL', 'c': 'IL:he', 'lbl': 'Local'}]:
@@ -259,90 +268,65 @@ def background_process():
                 rss = f"https://news.google.com/rss/search?q={quote(q)}&hl={loc['l']}&gl={loc['g']}&ceid={loc['c']}"
                 feed = feedparser.parse(rss)
                 for entry in feed.entries[:10]:
+                    # כאן התיקון: חילוץ השם מתוך הכותרת
+                    real_source = extract_site_name(entry.link, entry.title, is_google_news=True)
+                    clean_title_text = clean_title_google_news(entry.title)
+                    
                     new_articles.append({
                         'Date': cur_time, 
                         'Keyword': he if he else en,
                         'Article URL': entry.link, 
-                        'Site URL': extract_site_name(entry.link), # חילוץ שם האתר האמיתי
-                        'Title': entry.title,
+                        'Site URL': real_source, # גלצ, ynet וכו'
+                        'Title': clean_title_text,
                         'Is_User_Site': False,
-                        'Region': loc['lbl'] # לשמור מידע אם זה חו"ל או הארץ למיון
+                        'Region': loc['lbl']
                     })
             except: pass
 
-    # --- 4. עיבוד ומיון ---
+    # --- 4. מיזוג ומיון ---
     df_new = pd.DataFrame(new_articles)
-    
     if not df_new.empty:
-        # נרמול לינקים חדשים
         df_new['normalized_url'] = df_new['Article URL'].apply(normalize_url)
-        
-        # תרגום כותרות
         translator = GoogleTranslator(source='en', target='iw')
+        
         for idx, row in df_new.iterrows():
              if any(c.isalpha() and c.isascii() for c in row['Title']):
                 try: df_new.at[idx, 'Title'] = translator.translate(row['Title'])
                 except: pass
         
-        # *** תיקון תאריכים לכתבות שכבר קיימות ***
-        # אם הכתבה החדשה שמצאנו כבר קיימת במילון התאריכים המקוריים, נדרוס את התאריך החדש בתאריך הישן
+        # דריסת תאריך לכתבות קיימות
         def fix_date_if_exists(row):
             if row['normalized_url'] in url_to_original_date:
                 return url_to_original_date[row['normalized_url']]
             return row['Date']
-            
         df_new['Date'] = df_new.apply(fix_date_if_exists, axis=1)
 
-    # איחוד (החדשים מכילים כעת תאריכים מתוקנים אם הם כפולים)
     df_combined = pd.concat([df_new, df_old], ignore_index=True) if not df_old.empty else df_new
     
     if not df_combined.empty:
-        # מחיקת כפילויות - נשמור את הראשון. בגלל שתיקנו את התאריך, זה לא משנה מי נשמר, הנתונים זהים
         df_combined = df_combined.drop_duplicates(subset=['normalized_url'], keep='first')
 
-        # --- לוגיקת עדיפות ---
         def calculate_priority(row):
             norm_url = row['normalized_url']
-            
-            # אם זה היה בהיסטוריה - עדיפות אחרונה (4)
-            if norm_url in old_urls_set:
-                return 4
-            
-            # בדיקות לכתבות חדשות באמת:
-            # אם הגיע מהאתרים שלך (בדקנו קודם בתוך הפונקציית סריקה והוספנו דגל)
+            if norm_url in old_urls_set: return 4
             if row.get('Is_User_Site', False): return 1
-            # בדיקה fallback אם הדגל לא קיים (למשל ברשומות ישנות שלא נמחקו)
             if any(ps in row['Article URL'] for ps in priority_sites): return 1
-            
-            # גלובל מול לוקאל
             region = row.get('Region', '')
             if region == 'Global': return 2
             return 3 
 
         df_combined['Sort_Priority'] = df_combined.apply(calculate_priority, axis=1)
+        df_combined = df_combined.sort_values(by=['Keyword', 'Sort_Priority', 'Date'], ascending=[True, True, False])
 
-        # מיון: מילת מפתח -> עדיפות -> תאריך
-        df_combined = df_combined.sort_values(
-            by=['Keyword', 'Sort_Priority', 'Date'], 
-            ascending=[True, True, False]
-        )
-
-        # יצירת גליון סופי
         final_rows = [["תאריך ושעה", "מילת מפתח", "קישור לכתבה", "שם האתר", "כותרת"]]
         truly_new_keywords = set()
 
         grouped = df_combined.groupby('Keyword', sort=False)
         for kw, group in grouped:
             top_20 = group.head(20)
-            
-            if any(top_20['Sort_Priority'] < 4):
-                truly_new_keywords.add(kw)
-
+            if any(top_20['Sort_Priority'] < 4): truly_new_keywords.add(kw)
             for _, row in top_20.iterrows():
-                final_rows.append([
-                    row['Date'], row['Keyword'], row['Article URL'], row['Site URL'], row['Title']
-                ])
-            
+                final_rows.append([row['Date'], row['Keyword'], row['Article URL'], row['Site URL'], row['Title']])
             final_rows.append([""] * 5)
             final_rows.append([""] * 5)
 
