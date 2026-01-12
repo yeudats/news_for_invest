@@ -15,6 +15,7 @@ from flask import Flask
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import base64
+import re
 
 app = Flask(__name__)
 
@@ -34,19 +35,32 @@ IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
 def get_il_time():
     return datetime.now(IL_TIMEZONE).strftime("%Y-%m-%d %H:%M")
 
+def extract_site_name(url):
+    """
+    מחלץ את שם האתר הנקי מתוך הקישור.
+    למשל: https://www.globes.co.il/news/... -> globes.co.il
+    """
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        # הסרת www.
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain
+    except:
+        return "Unknown Source"
+
 def normalize_url(url):
     """
-    מנקה את הכתובת כדי למנוע כפילויות.
-    מסיר פרמטרים (אחרי סימן שאלה) ומסיר http/www כדי להשוות נטו את הכתובת.
+    ניקוי אגרסיבי של הכתובת להשוואה
     """
     if not url: return ""
     try:
         parsed = urlparse(url)
-        # בניית הכתובת מחדש ללא query parameters
+        # שימוש רק ב-netloc וב-path, התעלמות מ-http/https ומ-query parameters
         clean = f"{parsed.netloc}{parsed.path}"
-        # הסרת קידומות נפוצות לנרמול
         clean = clean.lower().replace("www.", "").replace("https://", "").replace("http://", "")
-        # הסרת לוכסן בסוף אם יש
+        # הסרת סלש בסוף
         if clean.endswith('/'): clean = clean[:-1]
         return clean
     except:
@@ -103,7 +117,6 @@ def scrape_single_site(site_data, keywords):
     status = "OK"
     try:
         rss_url = url
-        # רשימת RSS מהירה
         if not "xml" in url and not "rss" in url:
             if "ynet" in url: rss_url = "https://www.ynet.co.il/Integration/StoryRss2.xml"
             elif "globes" in url: rss_url = "https://www.globes.co.il/webservice/rss/rss.aspx?BID=2"
@@ -114,6 +127,7 @@ def scrape_single_site(site_data, keywords):
         response = requests.get(rss_url, headers=HEADERS, timeout=10)
         if response.status_code in [403, 401]: return [], "Blocked", row_idx
 
+        # כאן אנחנו לא קובעים תאריך סופי, זה יטופל בשלב המיזוג
         current_time_str = get_il_time()
 
         if "xml" in response.headers.get('Content-Type', '') or rss_url.endswith('xml'):
@@ -126,7 +140,14 @@ def scrape_single_site(site_data, keywords):
                         match, kw = True, (he if he else en); break
                 if not match: match, kw = check_keyword_in_article_body(l, keywords)
                 if match:
-                    found.append({'Date': current_time_str, 'Keyword': kw, 'Article URL': l, 'Site URL': url, 'Title': t})
+                    found.append({
+                        'Date': current_time_str, # זמני
+                        'Keyword': kw, 
+                        'Article URL': l, 
+                        'Site URL': extract_site_name(l), # שימוש בפונקציה החדשה
+                        'Title': t,
+                        'Is_User_Site': True # סימון פנימי
+                    })
         else:
             soup = BeautifulSoup(response.content, 'html.parser')
             links = soup.find_all('a', href=True)[:30]
@@ -136,7 +157,14 @@ def scrape_single_site(site_data, keywords):
                 if len(t) < 5: continue
                 match, kw = check_keyword_in_article_body(l, keywords)
                 if match:
-                    found.append({'Date': current_time_str, 'Keyword': kw, 'Article URL': l, 'Site URL': url, 'Title': t})
+                    found.append({
+                        'Date': current_time_str, 
+                        'Keyword': kw, 
+                        'Article URL': l, 
+                        'Site URL': extract_site_name(l), 
+                        'Title': t,
+                        'Is_User_Site': True
+                    })
     except Exception as e:
         status = f"Error: {str(e)[:10]}"
     return found, status, row_idx
@@ -154,24 +182,31 @@ def background_process():
     update_header_color(ws_sites, "red", "B")
     update_header_color(ws_log, "red", "E")
 
-    # --- 1. טעינת היסטוריה (כתבות ישנות) ---
+    # --- 1. טעינת היסטוריה ומיפוי תאריכים מקוריים ---
     existing_data = ws_log.get_all_values()
     df_old = pd.DataFrame()
-    col_map = {"תאריך ושעה": "Date", "מילת מפתח": "Keyword", "קישור לכתבה": "Article URL", "קישור לאתר": "Site URL", "כותרת": "Title"}
+    col_map = {"תאריך ושעה": "Date", "מילת מפתח": "Keyword", "קישור לכתבה": "Article URL", "שם האתר": "Site URL", "כותרת": "Title"}
+    
+    # מילון לשמירת התאריך המקורי של כל לינק
+    url_to_original_date = {} 
     
     if len(existing_data) > 1:
         headers_row = existing_data[0]
-        data_rows = [r for r in existing_data[1:] if r and len(r) > 2 and r[2]] # סינון שורות ריקות
+        # התאמת שם העמודה הרביעית אם השתנה בגליון
+        if headers_row[3] == "קישור לאתר": headers_row[3] = "שם האתר"
+        
+        data_rows = [r for r in existing_data[1:] if r and len(r) > 2 and r[2]]
         if data_rows:
             temp_df = pd.DataFrame(data_rows, columns=headers_row).rename(columns=col_map)
-            # בחירת רק העמודות הרלוונטיות למקרה של סטיות
             needed = list(col_map.values())
             if all(c in temp_df.columns for c in needed):
                 df_old = temp_df[needed].copy()
-                # יצירת עמודת נרמול להשוואה
                 df_old['normalized_url'] = df_old['Article URL'].apply(normalize_url)
+                
+                # מילוי המילון: נורמל_לינק -> תאריך_מקורי
+                for _, row in df_old.iterrows():
+                    url_to_original_date[row['normalized_url']] = row['Date']
 
-    # רשימת כתובות שכבר קיימות בהיסטוריה (לצורך סימון "לא חדש")
     old_urls_set = set(df_old['normalized_url'].tolist()) if not df_old.empty else set()
 
     # --- 2. עדכון מילות מפתח ---
@@ -185,11 +220,10 @@ def background_process():
         val_a = row[0].strip() if len(row) > 0 else ""
         val_b = row[1].strip() if len(row) > 1 else ""
         if not val_a and not val_b: continue
-
+        
         final_he, final_en = "", ""
         if contains_hebrew(val_a): final_he = val_a
         elif val_a: final_en = val_a
-        
         if contains_hebrew(val_b): final_he = val_b
         elif val_b: final_en = val_b
             
@@ -217,8 +251,8 @@ def background_process():
 
     # Google News
     cur_time = get_il_time()
-    for loc in [{'l': 'en', 'g': 'US', 'c': 'US:en', 'lbl': 'Global News'}, 
-                {'l': 'he', 'g': 'IL', 'c': 'IL:he', 'lbl': 'Local News'}]:
+    for loc in [{'l': 'en', 'g': 'US', 'c': 'US:en', 'lbl': 'Global'}, 
+                {'l': 'he', 'g': 'IL', 'c': 'IL:he', 'lbl': 'Local'}]:
         for he, en in keywords:
             q = en if loc['l'] == 'en' else he
             try:
@@ -226,15 +260,23 @@ def background_process():
                 feed = feedparser.parse(rss)
                 for entry in feed.entries[:10]:
                     new_articles.append({
-                        'Date': cur_time, 'Keyword': he if he else en,
-                        'Article URL': entry.link, 'Site URL': loc['lbl'], 'Title': entry.title
+                        'Date': cur_time, 
+                        'Keyword': he if he else en,
+                        'Article URL': entry.link, 
+                        'Site URL': extract_site_name(entry.link), # חילוץ שם האתר האמיתי
+                        'Title': entry.title,
+                        'Is_User_Site': False,
+                        'Region': loc['lbl'] # לשמור מידע אם זה חו"ל או הארץ למיון
                     })
             except: pass
 
-    # --- 4. עיבוד ומיון סופי ---
+    # --- 4. עיבוד ומיון ---
     df_new = pd.DataFrame(new_articles)
     
     if not df_new.empty:
+        # נרמול לינקים חדשים
+        df_new['normalized_url'] = df_new['Article URL'].apply(normalize_url)
+        
         # תרגום כותרות
         translator = GoogleTranslator(source='en', target='iw')
         for idx, row in df_new.iterrows():
@@ -242,57 +284,57 @@ def background_process():
                 try: df_new.at[idx, 'Title'] = translator.translate(row['Title'])
                 except: pass
         
-        # הוספת עמודת נרמול לחדשים
-        df_new['normalized_url'] = df_new['Article URL'].apply(normalize_url)
+        # *** תיקון תאריכים לכתבות שכבר קיימות ***
+        # אם הכתבה החדשה שמצאנו כבר קיימת במילון התאריכים המקוריים, נדרוס את התאריך החדש בתאריך הישן
+        def fix_date_if_exists(row):
+            if row['normalized_url'] in url_to_original_date:
+                return url_to_original_date[row['normalized_url']]
+            return row['Date']
+            
+        df_new['Date'] = df_new.apply(fix_date_if_exists, axis=1)
 
-    # איחוד כל הנתונים (חדש + ישן)
+    # איחוד (החדשים מכילים כעת תאריכים מתוקנים אם הם כפולים)
     df_combined = pd.concat([df_new, df_old], ignore_index=True) if not df_old.empty else df_new
     
     if not df_combined.empty:
-        # הסרת כפילויות לפי הכתובת המנורמלת
-        # אנו ממיינים קודם כדי לוודא שאם יש כפילות, נשמור את הגרסה שסימנו לה תאריך עדכני (למרות שזה לא קריטי אם זה אותו לינק)
+        # מחיקת כפילויות - נשמור את הראשון. בגלל שתיקנו את התאריך, זה לא משנה מי נשמר, הנתונים זהים
         df_combined = df_combined.drop_duplicates(subset=['normalized_url'], keep='first')
 
-        # --- לוגיקת המיון המתקדמת ---
-        
+        # --- לוגיקת עדיפות ---
         def calculate_priority(row):
             norm_url = row['normalized_url']
-            url_full = row['Article URL']
-            site_label = row['Site URL']
             
-            # בדיקה: האם זו כתבה שקיימת בהיסטוריה?
-            # אם היא הייתה ב-old_urls_set, היא נחשבת ישנה (Priority 4), גם אם מצאנו אותה שוב עכשיו.
-            is_history = norm_url in old_urls_set
+            # אם זה היה בהיסטוריה - עדיפות אחרונה (4)
+            if norm_url in old_urls_set:
+                return 4
             
-            if is_history:
-                return 4 # כתבות ישנות לתחתית
+            # בדיקות לכתבות חדשות באמת:
+            # אם הגיע מהאתרים שלך (בדקנו קודם בתוך הפונקציית סריקה והוספנו דגל)
+            if row.get('Is_User_Site', False): return 1
+            # בדיקה fallback אם הדגל לא קיים (למשל ברשומות ישנות שלא נמחקו)
+            if any(ps in row['Article URL'] for ps in priority_sites): return 1
             
-            # אם זו כתבה חדשה באמת (לא בהיסטוריה):
-            if any(ps in url_full for ps in priority_sites): return 1 # אתרי משתמש
-            if site_label == 'Global News': return 2 # חו"ל
-            return 3 # הארץ (או כל ברירת מחדל אחרת לחדש)
+            # גלובל מול לוקאל
+            region = row.get('Region', '')
+            if region == 'Global': return 2
+            return 3 
 
         df_combined['Sort_Priority'] = df_combined.apply(calculate_priority, axis=1)
 
-        # מיון:
-        # 1. לפי מילת מפתח
-        # 2. לפי עדיפות (1,2,3 - חדשים למעלה, 4 - ישנים למטה)
-        # 3. בתוך כל קבוצה - לפי תאריך (החדש ביותר ראשון)
+        # מיון: מילת מפתח -> עדיפות -> תאריך
         df_combined = df_combined.sort_values(
             by=['Keyword', 'Sort_Priority', 'Date'], 
             ascending=[True, True, False]
         )
 
-        # בניית הגליון הסופי (עד 20 תוצאות)
-        final_rows = [["תאריך ושעה", "מילת מפתח", "קישור לכתבה", "קישור לאתר", "כותרת"]]
+        # יצירת גליון סופי
+        final_rows = [["תאריך ושעה", "מילת מפתח", "קישור לכתבה", "שם האתר", "כותרת"]]
         truly_new_keywords = set()
 
-        grouped = df_combined.groupby('Keyword', sort=False) # sort=False שומר על סדר המיון שעשינו למעלה
+        grouped = df_combined.groupby('Keyword', sort=False)
         for kw, group in grouped:
             top_20 = group.head(20)
             
-            # בדיקה עבור התראה: האם ב-20 הכתבות המוצגות יש משהו חדש באמת?
-            # משהו חדש = Priority פחות מ-4 (כלומר 1, 2 או 3)
             if any(top_20['Sort_Priority'] < 4):
                 truly_new_keywords.add(kw)
 
@@ -309,9 +351,9 @@ def background_process():
         
         if truly_new_keywords:
             kws_str = ", ".join(list(truly_new_keywords))
-            send_notification(f"כתבות חדשות עבור: {kws_str}")
+            send_notification(f"חדש: {kws_str}")
         else:
-            print("No truly new articles (priority 1-3) found.")
+            print("No new priority articles.")
 
     update_header_color(ws_kwd, "green", "B")
     update_header_color(ws_sites, "green", "B")
