@@ -1,0 +1,9 @@
+gspread
+oauth2client
+requests
+beautifulsoup4
+feedparser
+deep-translator
+pandas
+pytz
+python-dotenv
