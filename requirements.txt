@@ -7,3 +7,4 @@ deep-translator
 pandas
 pytz
 python-dotenv
+google-generativeai

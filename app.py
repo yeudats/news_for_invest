@@ -13,19 +13,26 @@ import pytz
 from urllib.parse import quote, urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
+import google.generativeai as genai
+import time
 
 # --- הגדרות ---
-# load_dotenv נשאר כדי שתוכל להריץ גם לוקאלית, ב-GitHub המשתנים יגיעו מה-Secrets
 load_dotenv() 
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC_env")
 SHEET_NAME = os.environ.get("SHEET_NAME_env")
 SHEET_LINK = os.environ.get("SHEET_LINK_env")
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY") # מפתח ג'ימיני
+
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
 }
 
 IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
+
+# הגדרת ג'ימיני
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
 
 # --- פונקציות עזר ---
 
@@ -87,7 +94,6 @@ def get_sheet_client():
         info = json.loads(creds_json)
         creds = ServiceAccountCredentials.from_json_keyfile_dict(info, scope)
     else:
-        # אופציה לשימוש לוקאלי אם אין משתנה סביבה
         creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     return gspread.authorize(creds)
 
@@ -170,18 +176,62 @@ def scrape_single_site(site_data, keywords):
         status = f"Error: {str(e)[:10]}"
     return found, status, row_idx
 
+# --- פונקציית ניתוח עם Gemini ---
+def analyze_market_sentiment(keyword, articles):
+    if not GOOGLE_API_KEY:
+        return None
+
+    try:
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        
+        # בניית רשימת כותרות לניתוח
+        articles_text = "\n".join([f"- {a['Title']} (Source: {a['Site URL']})" for a in articles])
+        
+        prompt = f"""
+        You are an expert financial analyst. 
+        Analyze the following news headlines regarding the company/topic: "{keyword}".
+        
+        Headlines:
+        {articles_text}
+        
+        Based ONLY on these headlines, decide on a stock recommendation (Buy, Sell, Hold, Strong Buy, Strong Sell).
+        Provide a short explanation (max 3 sentences) in Hebrew.
+        
+        Return the result in this exact JSON format (no markdown):
+        {{
+            "recommendation": "YOUR_RECOMMENDATION",
+            "explanation": "YOUR_EXPLANATION_IN_HEBREW"
+        }}
+        """
+        
+        response = model.generate_content(prompt)
+        text_resp = response.text.replace('```json', '').replace('```', '').strip()
+        data = json.loads(text_resp)
+        return data
+    except Exception as e:
+        print(f"Gemini Error for {keyword}: {e}")
+        return None
+
 def background_process():
     print("Starting process...")
     client = get_sheet_client()
     sh = client.open(SHEET_NAME)
     
+    # פתיחת גליונות (יוצר גליון החלטות אם לא קיים)
     ws_kwd = sh.worksheet("מילות מפתח")
     ws_sites = sh.worksheet("אתרים לחיפוש")
     ws_log = sh.worksheet("תוצאות החיפוש")
+    
+    try:
+        ws_decisions = sh.worksheet("החלטות")
+    except:
+        ws_decisions = sh.add_worksheet(title="החלטות", rows=1000, cols=5)
+        ws_decisions.append_row(["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"])
 
     update_header_color(ws_kwd, "red", "B")
     update_header_color(ws_sites, "red", "B")
     update_header_color(ws_log, "red", "E")
+    update_header_color(ws_decisions, "red", "E")
 
     # --- 1. טעינת היסטוריה ---
     existing_data = ws_log.get_all_values()
@@ -267,7 +317,43 @@ def background_process():
                     })
             except: pass
 
-    # --- 4. מיזוג ומיון ---
+    # --- 4. ניתוח עם ג'ימיני (עבור כתבות חדשות שנמצאו בריצה זו) ---
+    if new_articles and GOOGLE_API_KEY:
+        print("Analyzing with Gemini...")
+        df_gemini = pd.DataFrame(new_articles)
+        grouped_gemini = df_gemini.groupby('Keyword')
+        
+        decisions_to_add = []
+        
+        for kw, group in grouped_gemini:
+            # שליחה לג'ימיני - ניתוח כל הכתבות שנמצאו עכשיו
+            articles_list = group[['Title', 'Site URL']].to_dict('records')
+            analysis = analyze_market_sentiment(kw, articles_list)
+            
+            if analysis:
+                row = [
+                    cur_time,
+                    kw,
+                    analysis.get('recommendation', 'N/A'),
+                    analysis.get('explanation', ''),
+                    len(articles_list)
+                ]
+                decisions_to_add.append(row)
+                time.sleep(1) # מניעת עומס על ה-API
+        
+        # עדכון גליון החלטות (הוספה בראש הטבלה)
+        if decisions_to_add:
+            current_decisions = ws_decisions.get_all_values()
+            # שמירת הכותרת ושורות קיימות
+            header = current_decisions[0] if current_decisions else ["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"]
+            existing_rows = current_decisions[1:] if len(current_decisions) > 1 else []
+            
+            # מיזוג: חדשים למעלה + ישנים
+            new_content = [header] + decisions_to_add + existing_rows
+            ws_decisions.clear()
+            ws_decisions.update(new_content)
+
+    # --- 5. מיזוג ומיון ללוג הראשי ---
     df_new = pd.DataFrame(new_articles)
     if not df_new.empty:
         df_new['normalized_url'] = df_new['Article URL'].apply(normalize_url)
@@ -325,8 +411,8 @@ def background_process():
     update_header_color(ws_kwd, "green", "B")
     update_header_color(ws_sites, "green", "B")
     update_header_color(ws_log, "green", "E")
+    update_header_color(ws_decisions, "green", "E")
     print("Done.")
 
-# הפעלה ישירה של הפונקציה כשמריצים את הקובץ
 if __name__ == "__main__":
     background_process()
