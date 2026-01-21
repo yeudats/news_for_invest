@@ -15,7 +15,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 from google import genai
 import time
-import re
 
 # --- הגדרות ---
 load_dotenv()
@@ -31,12 +30,8 @@ HEADERS = {
 
 IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
 
-# הגדרת ג'ימיני
 if GOOGLE_API_KEY:
-    client = genai.Client(
-        api_key=GOOGLE_API_KEY,
-        http_options={'api_version': 'v1'}
-        )
+    client = genai.Client(api_key=GOOGLE_API_KEY, http_options={'api_version': 'v1'})
 else:
     print("WARNING: GOOGLE_API_KEY is missing!")
 
@@ -46,81 +41,53 @@ def get_il_time():
     return datetime.now(IL_TIMEZONE).strftime("%Y-%m-%d %H:%M")
 
 def extract_domain_name(url):
-    """מחלץ רק את שם הדומיין (למשל globes מהכתובת המלאה)"""
     try:
         if not url: return ""
         parsed = urlparse(url)
-        domain = parsed.netloc
-        domain = domain.replace("www.", "").split('.')[0]
+        domain = parsed.netloc.replace("www.", "").split('.')[0]
         return domain.lower()
-    except:
-        return ""
+    except: return ""
 
 def extract_site_name(url, title=None, is_google_news=False):
     if is_google_news and title:
         parts = title.rsplit(' - ', 1)
-        if len(parts) > 1:
-            return parts[1].strip()
-    
+        if len(parts) > 1: return parts[1].strip()
     try:
-        parsed = urlparse(url)
-        domain = parsed.netloc
-        if domain.startswith("www."):
-            domain = domain[4:]
-        return domain
-    except:
-        return "Unknown Source"
+        domain = urlparse(url).netloc
+        return domain.replace("www.", "")
+    except: return "Unknown"
 
 def clean_title_google_news(title):
     parts = title.rsplit(' - ', 1)
-    if len(parts) > 1:
-        return parts[0].strip()
-    return title
+    return parts[0].strip() if len(parts) > 1 else title
 
 def normalize_url(url):
-    if not url: return ""
     try:
         parsed = urlparse(url)
-        clean = f"{parsed.netloc}{parsed.path}"
-        clean = clean.lower().replace("www.", "").replace("https://", "").replace("http://", "")
-        if clean.endswith('/'): clean = clean[:-1]
-        return clean
-    except:
-        return url
+        clean = f"{parsed.netloc}{parsed.path}".lower().replace("www.", "")
+        return clean.strip('/')
+    except: return url
 
 def send_notification(message):
     try:
         url = f"https://ntfy.sh/{NTFY_TOPIC}"
-        title = "כתבות חדשות"
-        encoded_title = f"=?utf-8?b?{base64.b64encode(title.encode('utf-8')).decode('utf-8')}?="
-        headers = {
-            "Title": encoded_title,
-            "Click": SHEET_LINK,
-            "Tags": "newspaper",
-            "Priority": "3"
-        }
+        headers = {"Title": "New Articles Found", "Priority": "3"}
         requests.post(url, data=message.encode('utf-8'), headers=headers, timeout=10)
-    except Exception as e:
-        print(f"Notification Error: {e}")
+    except: pass
 
 def get_sheet_client():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_json = os.environ.get("GOOGLE_CREDS_JSON")
-    
     if creds_json:
-        info = json.loads(creds_json)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(info, scope)
-    else:
-        creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-    return gspread.authorize(creds)
+        return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(json.loads(creds_json), scope))
+    return gspread.authorize(ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope))
 
 def contains_hebrew(text):
     return any("\u0590" <= c <= "\u05FF" for c in text)
 
 def update_header_color(worksheet, color_type, header_length):
     color = {'red': 1.0, 'green': 0.8, 'blue': 0.8} if color_type == "red" else {'red': 0.8, 'green': 1.0, 'blue': 0.8}
-    try:
-        worksheet.format(f"A1:{header_length}1", {"backgroundColor": color, "textFormat": {"bold": True}})
+    try: worksheet.format(f"A1:{header_length}1", {"backgroundColor": color, "textFormat": {"bold": True}})
     except: pass
 
 def check_keyword_in_article_body(article_url, keywords):
@@ -136,336 +103,136 @@ def check_keyword_in_article_body(article_url, keywords):
 
 def scrape_single_site(site_data, keywords):
     url, row_idx = site_data
-    found = []
-    status = "OK"
+    found, status = [], "OK"
     try:
         rss_url = url
-        # מיפוי RSS ידני לאתרים נפוצים
-        if not "xml" in url and not "rss" in url:
-            if "ynet" in url: rss_url = "https://www.ynet.co.il/Integration/StoryRss2.xml"
-            elif "globes" in url: rss_url = "https://www.globes.co.il/webservice/rss/rss.aspx?BID=2"
-            elif "calcalist" in url: rss_url = "https://www.calcalist.co.il/GeneralRSS/0,16335,L-8,00.xml"
-            elif "themarker" in url: rss_url = "https://www.themarker.com/srv/tm-market-rss"
-            elif "bizportal" in url: rss_url = "https://www.bizportal.co.il/forumpages/rss/general"
-
-        response = requests.get(rss_url, headers=HEADERS, timeout=10)
+        if "ynet" in url: rss_url = "https://www.ynet.co.il/Integration/StoryRss2.xml"
+        elif "globes" in url: rss_url = "https://www.globes.co.il/webservice/rss/rss.aspx?BID=2"
         
-        if response.status_code == 403:
-            return [], "Blocked (403)", row_idx
-        if response.status_code != 200:
-            return [], f"Error {response.status_code}", row_idx
+        response = requests.get(rss_url, headers=HEADERS, timeout=10)
+        if response.status_code == 403: return [], "Blocked (403)", row_idx
+        if response.status_code != 200: return [], f"Error {response.status_code}", row_idx
 
-        current_time_str = get_il_time()
-
+        cur_time = get_il_time()
         if "xml" in response.headers.get('Content-Type', '') or rss_url.endswith('xml'):
             feed = feedparser.parse(response.content)
-            if not feed.entries: status = "No RSS Entries"
-            for entry in feed.entries[:30]:
-                t, l = entry.title, entry.link
+            for entry in feed.entries[:20]:
                 match, kw = False, ""
                 for he, en in keywords:
-                    if (he and he.lower() in t.lower()) or (en and en.lower() in t.lower()):
+                    if (he and he.lower() in entry.title.lower()) or (en and en.lower() in entry.title.lower()):
                         match, kw = True, (he if he else en); break
-                if not match: match, kw = check_keyword_in_article_body(l, keywords)
+                if not match: match, kw = check_keyword_in_article_body(entry.link, keywords)
                 if match:
-                    site_name = extract_site_name(url)
-                    found.append({
-                        'Date': current_time_str,
-                        'Keyword': kw, 
-                        'Article URL': l, 
-                        'Site URL': site_name, 
-                        'Title': t,
-                        'Is_User_Site': True # זה אתר שהמשתמש ביקש
-                    })
+                    found.append({'Date': cur_time, 'Keyword': kw, 'Article URL': entry.link, 'Site URL': extract_site_name(url), 'Title': entry.title, 'Is_User_Site': True})
         else:
             soup = BeautifulSoup(response.content, 'html.parser')
-            links = soup.find_all('a', href=True)[:30]
-            if not links: status = "No Links Found"
-            for a in links:
-                t = a.get_text(" ", strip=True)
-                l = urljoin(url, a['href'])
-                if len(t) < 5: continue
-                match, kw = check_keyword_in_article_body(l, keywords)
+            for a in soup.find_all('a', href=True)[:30]:
+                link = urljoin(url, a['href'])
+                match, kw = check_keyword_in_article_body(link, keywords)
                 if match:
-                    site_name = extract_site_name(url)
-                    found.append({
-                        'Date': current_time_str, 
-                        'Keyword': kw, 
-                        'Article URL': l, 
-                        'Site URL': site_name, 
-                        'Title': t,
-                        'Is_User_Site': True
-                    })
-    except Exception as e:
-        status = f"Err: {str(e)[:15]}"
+                    found.append({'Date': cur_time, 'Keyword': kw, 'Article URL': link, 'Site URL': extract_site_name(url), 'Title': a.get_text(" ", strip=True), 'Is_User_Site': True})
+    except Exception as e: status = f"Err: {str(e)[:15]}"
     return found, status, row_idx
 
-# --- פונקציית ניתוח עם Gemini ---
-def analyze_market_sentiment(keyword, articles):
-    if not GOOGLE_API_KEY:
-        return None
-
-    # הגבלה ל-25 כתבות כדי לחסוך בטוקנים ולמנוע חסימה
-    articles_to_send = articles[:25] 
-    articles_text = "\n".join([f"- {a['Title']} (Source: {a['Site URL']})" for a in articles_to_send])
+# --- ניתוח מאוחד בבקשה אחת ---
+def analyze_all_keywords_at_once(data_dict):
+    if not GOOGLE_API_KEY or not data_dict: return None
     
-    prompt = f"""
-    You are a financial analyst. Analyze these headlines for: "{keyword}".
-    Headlines:
-    {articles_text}
+    # בניית פרומפט מאוחד
+    prompt = "You are a financial analyst. Analyze the following news for multiple subjects. For each subject, provide a recommendation (Buy/Sell/Hold/Strong Buy/Strong Sell) and a short 1-2 sentence explanation in Hebrew.\n\n"
     
-    Output JSON only:
-    {{
-        "recommendation": "Buy/Sell/Hold/Strong Buy/Strong Sell",
-        "explanation": "Short explanation in Hebrew (max 2 sentences)."
-    }}
-    """
+    for kw, articles in data_dict.items():
+        prompt += f"### Subject: {kw}\n"
+        for i, a in enumerate(articles[:15], 1):
+            prompt += f"{i}. {a['Title']} (Source: {a['Site URL']})\n"
+        prompt += "\n"
 
-    for attempt in range(3): # ניסיון חוזר עד 3 פעמים
-        try:
-            response = client.models.generate_content(
-                model="gemini-1.5-flash-8b", # מודל חסכוני יותר
-                contents=prompt
-            )
-            
-            text_resp = response.text.strip()
-            if text_resp.startswith("```json"): text_resp = text_resp[7:]
-            if text_resp.endswith("```"): text_resp = text_resp[:-3]
-            return json.loads(text_resp)
+    prompt += "\nOutput MUST be a valid JSON list of objects: [{\"keyword\": \"...\", \"recommendation\": \"...\", \"explanation\": \"...\"}]"
 
-        except Exception as e:
-            if "429" in str(e):
-                print(f"Rate limit hit for {keyword}. Waiting 60 seconds...")
-                time.sleep(60) # המתנה של דקה בגלל חריגת מכסה
-                continue
-            print(f"Gemini Error {keyword}: {e}")
-            break
-    return None
+    try:
+        response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+        text = response.text.strip()
+        if "```json" in text: text = text.split("```json")[1].split("```")[0]
+        return json.loads(text)
+    except Exception as e:
+        return f"Error: {str(e)}"
 
+# --- תהליך ראשי ---
 def background_process():
     print("Starting process...")
     client = get_sheet_client()
     sh = client.open(SHEET_NAME)
-    
-    ws_kwd = sh.worksheet("מילות מפתח")
-    ws_sites = sh.worksheet("אתרים לחיפוש")
-    ws_log = sh.worksheet("תוצאות החיפוש")
-    
-    try:
-        ws_decisions = sh.worksheet("החלטות")
-    except:
-        ws_decisions = sh.add_worksheet(title="החלטות", rows=1000, cols=5)
-        ws_decisions.append_row(["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"])
+    ws_kwd, ws_sites, ws_log, ws_decisions = sh.worksheet("מילות מפתח"), sh.worksheet("אתרים לחיפוש"), sh.worksheet("תוצאות החיפוש"), sh.worksheet("החלטות")
 
-    update_header_color(ws_kwd, "red", "B")
-    update_header_color(ws_sites, "red", "B")
-    update_header_color(ws_log, "red", "E")
-    update_header_color(ws_decisions, "red", "E")
-
-    # --- 1. טעינת היסטוריה ---
-    print("Loading history...")
-    existing_data = ws_log.get_all_values()
-    df_old = pd.DataFrame()
-    col_map = {"תאריך ושעה": "Date", "מילת מפתח": "Keyword", "קישור לכתבה": "Article URL", "שם האתר": "Site URL", "כותרת": "Title"}
-    url_to_original_date = {} 
-
-    if len(existing_data) > 1:
-        headers_row = existing_data[0]
-        if len(headers_row) > 3: headers_row[3] = "שם האתר"
-        data_rows = [r for r in existing_data[1:] if r and len(r) > 2 and r[2]]
-        if data_rows:
-            temp_df = pd.DataFrame(data_rows, columns=headers_row).rename(columns=col_map)
-            needed = list(col_map.values())
-            if all(c in temp_df.columns for c in needed):
-                df_old = temp_df[needed].copy()
-                df_old['normalized_url'] = df_old['Article URL'].apply(normalize_url)
-                for _, row in df_old.iterrows():
-                    url_to_original_date[row['normalized_url']] = row['Date']
-
-    old_urls_set = set(df_old['normalized_url'].tolist()) if not df_old.empty else set()
-
-    # --- 2. עדכון מילות מפתח ---
-    k_vals = ws_kwd.get_all_values()
+    # 1. טעינת מילות מפתח
+    k_vals = ws_kwd.get_all_values()[1:]
     keywords = []
-    updates = []
-    trans_en = GoogleTranslator(source='auto', target='en')
-    trans_he = GoogleTranslator(source='auto', target='iw')
+    for row in k_vals:
+        if any(row): keywords.append((row[0], row[1]))
 
-    for i, row in enumerate(k_vals[1:], 2):
-        val_a = row[0].strip() if len(row) > 0 else ""
-        val_b = row[1].strip() if len(row) > 1 else ""
-        if not val_a and not val_b: continue
-        
-        final_he, final_en = "", ""
-        if contains_hebrew(val_a): final_he = val_a
-        elif val_a: final_en = val_a
-        if contains_hebrew(val_b): final_he = val_b
-        elif val_b: final_en = val_b
-        if final_he and not final_en: final_en = trans_en.translate(final_he)
-        elif final_en and not final_he:
-            t = trans_he.translate(final_en)
-            final_he = t if t.lower() != final_en.lower() else final_en
-
-        keywords.append((final_he, final_en))
-        if val_a != final_he or val_b != final_en:
-            updates.append({'range': f'A{i}:B{i}', 'values': [[final_he, final_en]]})
-    if updates: ws_kwd.batch_update(updates)
-
-    # --- 3. סריקה חדשה (כולל עדכון סטטוסים) ---
-    print(f"Scraping sites for {len(keywords)} keywords...")
-    new_articles = []
-    priority_sites_raw = [r[0] for r in ws_sites.get_all_values()[1:] if r and r[0].startswith('http')]
-    # שמירת דומיינים של אתרי המשתמש (למשל globes, ynet) כדי לזהות אותם גם ב-Google News
-    user_domains = {extract_domain_name(url) for url in priority_sites_raw}
+    # 2. סריקת אתרים שהמשתמש נתן (עדיפות 1)
+    print("Scraping user sites...")
+    priority_sites = [(r[0], i) for i, r in enumerate(ws_sites.get_all_values()[1:], 2) if r and r[0].startswith('http')]
+    user_domains = {extract_domain_name(url) for url, _ in priority_sites}
     
-    sites_data = [(url, i) for i, url in enumerate(priority_sites_raw, 2)]
-    site_statuses = {} # לשמירת סטטוסים
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(scrape_single_site, s, keywords): s for s in sites_data}
-        for future in as_completed(futures):
-            arts, status, ridx = future.result()
+    new_articles, statuses = [], []
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(scrape_single_site, s, keywords) for s in priority_sites]
+        for f in as_completed(futures):
+            arts, stat, idx = f.result()
             new_articles.extend(arts)
-            site_statuses[ridx] = status
+            statuses.append({'range': f'C{idx}', 'values': [[stat]]})
     
-    # עדכון סטטוסים בגיליון "אתרים לחיפוש" בטור C
-    if site_statuses:
-        status_updates = []
-        for ridx, stat in site_statuses.items():
-            status_updates.append({'range': f'C{ridx}', 'values': [[stat]]})
-        try:
-            ws_sites.batch_update(status_updates)
-        except Exception as e: print(f"Status update failed: {e}")
+    if statuses: ws_sites.batch_update(statuses)
 
-    # Google News Loop
+    # 3. סריקת Google News (עדיפות נמוכה יותר)
+    print("Scraping Google News...")
     cur_time = get_il_time()
-    for loc in [{'l': 'en', 'g': 'US', 'c': 'US:en', 'lbl': 'Global'}, 
-                {'l': 'he', 'g': 'IL', 'c': 'IL:he', 'lbl': 'Local'}]:
-        for he, en in keywords:
-            q = en if loc['l'] == 'en' else he
-            try:
-                rss = f"https://news.google.com/rss/search?q={quote(q)}&hl={loc['l']}&gl={loc['g']}&ceid={loc['c']}"
-                feed = feedparser.parse(rss)
-                for entry in feed.entries[:10]:
-                    real_source = extract_site_name(entry.link, entry.title, is_google_news=True)
-                    clean_title_text = clean_title_google_news(entry.title)
-                    new_articles.append({
-                        'Date': cur_time, 
-                        'Keyword': he if he else en,
-                        'Article URL': entry.link, 
-                        'Site URL': real_source,
-                        'Title': clean_title_text,
-                        'Is_User_Site': False, # יחושב מחדש בהמשך
-                        'Region': loc['lbl']
-                    })
-            except: pass
+    for he, en in keywords:
+        q = he if he else en
+        try:
+            feed = feedparser.parse(f"[https://news.google.com/rss/search?q=](https://news.google.com/rss/search?q=){quote(q)}&hl=he&gl=IL&ceid=IL:he")
+            for entry in feed.entries[:10]:
+                src = extract_site_name(entry.link, entry.title, True)
+                new_articles.append({'Date': cur_time, 'Keyword': he, 'Article URL': entry.link, 'Site URL': src, 'Title': clean_title_google_news(entry.title), 'Is_User_Site': (extract_domain_name(src) in user_domains)})
+        except: pass
 
-    # --- 4. מיזוג ומיון ---
-    df_new = pd.DataFrame(new_articles)
-    if not df_new.empty:
-        df_new['normalized_url'] = df_new['Article URL'].apply(normalize_url)
-        # תרגום כותרות
-        translator = GoogleTranslator(source='en', target='iw')
-        for idx, row in df_new.iterrows():
-             if any(c.isalpha() and c.isascii() for c in row['Title']):
-                try: df_new.at[idx, 'Title'] = translator.translate(row['Title'])
-                except: pass
-        
-        # שמירת תאריך מקורי
-        def fix_date_if_exists(row):
-            if row['normalized_url'] in url_to_original_date:
-                return url_to_original_date[row['normalized_url']]
-            return row['Date']
-        df_new['Date'] = df_new.apply(fix_date_if_exists, axis=1)
+    # 4. עיבוד ומיון
+    df = pd.DataFrame(new_articles).drop_duplicates(subset=['Article URL'])
+    if df.empty: return print("No articles found.")
 
-    df_combined = pd.concat([df_new, df_old], ignore_index=True) if not df_old.empty else df_new
-    
-    if not df_combined.empty:
-        df_combined = df_combined.drop_duplicates(subset=['normalized_url'], keep='first')
+    def get_priority(row):
+        if row['Is_User_Site']: return 1
+        return 2
 
-        # --- לוגיקת עדיפות מתוקנת ---
-        def calculate_priority(row):
-            norm_url = row['normalized_url']
-            
-            # עדיפות 4: כתבה שכבר ראינו בעבר
-            if norm_url in old_urls_set: return 4
-            
-            # עדיפות 1: אתר שהמשתמש ביקש (בין אם הגיע ישירות או דרך Google News)
-            # בודקים אם הדומיין של הכתבה נמצא ברשימת הדומיינים של המשתמש
-            article_domain = extract_domain_name(row['Site URL'])
-            if row.get('Is_User_Site', False) or article_domain in user_domains:
-                return 1
-            
-            # בדיקה נוספת למקרה שהדומיין מופיע בתוך ה-URL עצמו
-            for ud in user_domains:
-                if ud and ud in row['Article URL'].lower():
-                    return 1
+    df['Priority'] = df.apply(get_priority, axis=1)
+    df = df.sort_values(by=['Keyword', 'Priority', 'Date'], ascending=[True, True, False])
 
-            if row.get('Region', '') == 'Global': return 2
-            return 3 
+    # 5. ניתוח ג'ימיני מאוחד
+    print("Starting Gemini Bulk Analysis...")
+    analysis_input = {kw: group.to_dict('records') for kw, group in df.groupby('Keyword')}
+    results = analyze_all_keywords_at_once(analysis_input)
 
-        df_combined['Sort_Priority'] = df_combined.apply(calculate_priority, axis=1)
-        df_combined = df_combined.sort_values(by=['Keyword', 'Sort_Priority', 'Date'], ascending=[True, True, False])
+    # 6. עדכון גיליון החלטות
+    ws_decisions.clear()
+    if isinstance(results, str) and "Error" in results:
+        ws_decisions.append_row(["שגיאת מערכת / חסימה", results])
+    elif results:
+        ws_decisions.append_row(["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"])
+        for res in results:
+            kw = res.get('keyword')
+            count = len(df[df['Keyword'] == kw])
+            ws_decisions.append_row([cur_time, kw, res.get('recommendation'), res.get('explanation'), count])
 
+    # 7. עדכון לוג תוצאות
+    final_rows = [["תאריך ושעה", "מילת מפתח", "קישור לכתבה", "שם האתר", "כותרת"]]
+    for kw, group in df.groupby('Keyword'):
+        for _, r in group.head(15).iterrows():
+            final_rows.append([r['Date'], r['Keyword'], r['Article URL'], r['Site URL'], r['Title']])
+        final_rows.append([""]*5)
 
-    # --- 5. ניתוח עם ג'ימיני ---
-    if GOOGLE_API_KEY and not df_combined.empty:
-        print("Starting Gemini analysis...")
-        
-        existing_decisions = ws_decisions.get_all_values()
-        decision_header = ["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"]
-        decision_map = {r[1]: r for r in existing_decisions[1:] if r and len(r) >= 2}
-
-        keywords_with_new_data = set(df_new['Keyword'].unique()) if not df_new.empty else set()
-        force_update_all = len(existing_decisions) < 2
-        grouped_combined = df_combined.groupby('Keyword')
-        changes_made = False
-
-        for kw, group in grouped_combined:
-            if kw in keywords_with_new_data or kw not in decision_map or force_update_all:
-                articles_list = group[['Title', 'Site URL']].to_dict('records')
-                
-                # ניתוח
-                analysis = analyze_market_sentiment(kw, articles_list)
-                
-                if analysis:
-                    print(f"--> Success: Decision for {kw}")
-                    decision_map[kw] = [cur_time, kw, analysis.get('recommendation', 'N/A'), analysis.get('explanation', ''), len(articles_list)]
-                    changes_made = True
-                    time.sleep(10) # הגדלת ההמתנה ל-10 שניות בין מילים באופן קבוע
-                else:
-                    print(f"--> Failed to analyze {kw} after retries.")
-
-        if changes_made:
-            rows_to_write = [decision_header] + list(decision_map.values())
-            ws_decisions.clear()
-            ws_decisions.update(rows_to_write)
-    
-    # --- 6. כתיבת לוג סופי ---
-    if not df_combined.empty:
-        final_rows = [["תאריך ושעה", "מילת מפתח", "קישור לכתבה", "שם האתר", "כותרת"]]
-        truly_new_keywords = set()
-
-        grouped = df_combined.groupby('Keyword', sort=False)
-        for kw, group in grouped:
-            top_20 = group.head(20)
-            if any(top_20['Sort_Priority'] < 4): truly_new_keywords.add(kw)
-            for _, row in top_20.iterrows():
-                final_rows.append([row['Date'], row['Keyword'], row['Article URL'], row['Site URL'], row['Title']])
-            final_rows.append([""] * 5)
-            final_rows.append([""] * 5)
-
-        ws_log.clear()
-        ws_log.update(final_rows)
-        
-        if truly_new_keywords:
-            kws_str = ", ".join(list(truly_new_keywords))
-            send_notification(f"חדש: {kws_str}")
-
-    update_header_color(ws_kwd, "green", "B")
-    update_header_color(ws_sites, "green", "B")
-    update_header_color(ws_log, "green", "E")
-    update_header_color(ws_decisions, "green", "E")
+    ws_log.clear()
+    ws_log.update(final_rows)
     print("Done.")
 
 if __name__ == "__main__":
