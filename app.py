@@ -34,7 +34,7 @@ IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
 if GOOGLE_API_KEY:
     # הגדרת הלקוח (Client) עם ה-API Key שלך
     client = genai.Client(
-        api_key="AIzaSyDqhOltrYuUnIvmkTMx68idiVGBr4mDUxE",
+        api_key=GOOGLE_API_KEY,
         http_options={'api_version': 'v1'}
         )
 else:
