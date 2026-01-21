@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 from google import genai
 import time
+import re
 
 # --- הגדרות ---
 load_dotenv()
@@ -43,6 +44,17 @@ else:
 
 def get_il_time():
     return datetime.now(IL_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+
+def extract_domain_name(url):
+    """מחלץ רק את שם הדומיין (למשל globes מהכתובת המלאה)"""
+    try:
+        if not url: return ""
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        domain = domain.replace("www.", "").split('.')[0]
+        return domain.lower()
+    except:
+        return ""
 
 def extract_site_name(url, title=None, is_google_news=False):
     if is_google_news and title:
@@ -128,6 +140,7 @@ def scrape_single_site(site_data, keywords):
     status = "OK"
     try:
         rss_url = url
+        # מיפוי RSS ידני לאתרים נפוצים
         if not "xml" in url and not "rss" in url:
             if "ynet" in url: rss_url = "https://www.ynet.co.il/Integration/StoryRss2.xml"
             elif "globes" in url: rss_url = "https://www.globes.co.il/webservice/rss/rss.aspx?BID=2"
@@ -136,12 +149,17 @@ def scrape_single_site(site_data, keywords):
             elif "bizportal" in url: rss_url = "https://www.bizportal.co.il/forumpages/rss/general"
 
         response = requests.get(rss_url, headers=HEADERS, timeout=10)
-        if response.status_code in [403, 401]: return [], "Blocked", row_idx
+        
+        if response.status_code == 403:
+            return [], "Blocked (403)", row_idx
+        if response.status_code != 200:
+            return [], f"Error {response.status_code}", row_idx
 
         current_time_str = get_il_time()
 
         if "xml" in response.headers.get('Content-Type', '') or rss_url.endswith('xml'):
             feed = feedparser.parse(response.content)
+            if not feed.entries: status = "No RSS Entries"
             for entry in feed.entries[:30]:
                 t, l = entry.title, entry.link
                 match, kw = False, ""
@@ -157,11 +175,12 @@ def scrape_single_site(site_data, keywords):
                         'Article URL': l, 
                         'Site URL': site_name, 
                         'Title': t,
-                        'Is_User_Site': True
+                        'Is_User_Site': True # זה אתר שהמשתמש ביקש
                     })
         else:
             soup = BeautifulSoup(response.content, 'html.parser')
             links = soup.find_all('a', href=True)[:30]
+            if not links: status = "No Links Found"
             for a in links:
                 t = a.get_text(" ", strip=True)
                 l = urljoin(url, a['href'])
@@ -178,55 +197,50 @@ def scrape_single_site(site_data, keywords):
                         'Is_User_Site': True
                     })
     except Exception as e:
-        status = f"Error: {str(e)[:10]}"
+        status = f"Err: {str(e)[:15]}"
     return found, status, row_idx
 
 # --- פונקציית ניתוח עם Gemini ---
 def analyze_market_sentiment(keyword, articles):
     if not GOOGLE_API_KEY:
-        print("Error: No API Key for Gemini.")
         return None
 
-    try:
-        # מגבלה: נשלח מקסימום 50 כותרות כדי לא להעמיס יותר מדי על הפרומפט
-        articles_to_send = articles[:50] 
-        articles_text = "\n".join([f"- {a['Title']} (Source: {a['Site URL']}, Date: {a.get('Date', 'N/A')})" for a in articles_to_send])
-        
-        prompt = f"""
-        You are an expert financial analyst. 
-        Analyze the following news headlines regarding the company/topic: "{keyword}".
-        Total articles found: {len(articles)}. Displaying titles for analysis below:
+    # הגבלה ל-25 כתבות כדי לחסוך בטוקנים ולמנוע חסימה
+    articles_to_send = articles[:25] 
+    articles_text = "\n".join([f"- {a['Title']} (Source: {a['Site URL']})" for a in articles_to_send])
+    
+    prompt = f"""
+    You are a financial analyst. Analyze these headlines for: "{keyword}".
+    Headlines:
+    {articles_text}
+    
+    Output JSON only:
+    {{
+        "recommendation": "Buy/Sell/Hold/Strong Buy/Strong Sell",
+        "explanation": "Short explanation in Hebrew (max 2 sentences)."
+    }}
+    """
 
-        Headlines:
-        {articles_text}
-        
-        Based on these headlines (and the sentiment of the text), decide on a stock recommendation (Buy, Sell, Hold, Strong Buy, Strong Sell).
-        If the news are neutral or old, lean towards 'Hold'.
-        Provide a short explanation (max 3 sentences) in Hebrew.
-        
-        Output JSON:
-        {{
-            "recommendation": "YOUR_RECOMMENDATION",
-            "explanation": "YOUR_EXPLANATION_IN_HEBREW"
-        }}
-        """
-        
-        response = client.models.generate_content(
-                model="models/gemini-2.0-flash", 
+    for attempt in range(3): # ניסיון חוזר עד 3 פעמים
+        try:
+            response = client.models.generate_content(
+                model="gemini-1.5-flash-8b", # מודל חסכוני יותר
                 contents=prompt
             )
-        
-        text_resp = response.text.strip()
-        if text_resp.startswith("```json"):
-            text_resp = text_resp[7:]
-        if text_resp.endswith("```"):
-            text_resp = text_resp[:-3]
             
-        data = json.loads(text_resp)
-        return data
-    except Exception as e:
-        print(f"Gemini Critical Error for {keyword}: {e}")
-        return None
+            text_resp = response.text.strip()
+            if text_resp.startswith("```json"): text_resp = text_resp[7:]
+            if text_resp.endswith("```"): text_resp = text_resp[:-3]
+            return json.loads(text_resp)
+
+        except Exception as e:
+            if "429" in str(e):
+                print(f"Rate limit hit for {keyword}. Waiting 60 seconds...")
+                time.sleep(60) # המתנה של דקה בגלל חריגת מכסה
+                continue
+            print(f"Gemini Error {keyword}: {e}")
+            break
+    return None
 
 def background_process():
     print("Starting process...")
@@ -297,17 +311,31 @@ def background_process():
             updates.append({'range': f'A{i}:B{i}', 'values': [[final_he, final_en]]})
     if updates: ws_kwd.batch_update(updates)
 
-    # --- 3. סריקה חדשה ---
+    # --- 3. סריקה חדשה (כולל עדכון סטטוסים) ---
     print(f"Scraping sites for {len(keywords)} keywords...")
     new_articles = []
-    priority_sites = [r[0] for r in ws_sites.get_all_values()[1:] if r and r[0].startswith('http')]
-    sites_data = [(url, i) for i, url in enumerate(priority_sites, 2)]
+    priority_sites_raw = [r[0] for r in ws_sites.get_all_values()[1:] if r and r[0].startswith('http')]
+    # שמירת דומיינים של אתרי המשתמש (למשל globes, ynet) כדי לזהות אותם גם ב-Google News
+    user_domains = {extract_domain_name(url) for url in priority_sites_raw}
     
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    sites_data = [(url, i) for i, url in enumerate(priority_sites_raw, 2)]
+    site_statuses = {} # לשמירת סטטוסים
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
         futures = {executor.submit(scrape_single_site, s, keywords): s for s in sites_data}
         for future in as_completed(futures):
-            arts, _, _ = future.result()
+            arts, status, ridx = future.result()
             new_articles.extend(arts)
+            site_statuses[ridx] = status
+    
+    # עדכון סטטוסים בגיליון "אתרים לחיפוש" בטור C
+    if site_statuses:
+        status_updates = []
+        for ridx, stat in site_statuses.items():
+            status_updates.append({'range': f'C{ridx}', 'values': [[stat]]})
+        try:
+            ws_sites.batch_update(status_updates)
+        except Exception as e: print(f"Status update failed: {e}")
 
     # Google News Loop
     cur_time = get_il_time()
@@ -327,25 +355,23 @@ def background_process():
                         'Article URL': entry.link, 
                         'Site URL': real_source,
                         'Title': clean_title_text,
-                        'Is_User_Site': False,
+                        'Is_User_Site': False, # יחושב מחדש בהמשך
                         'Region': loc['lbl']
                     })
             except: pass
 
-    print(f"Total articles found (before filter): {len(new_articles)}")
-
-    # --- 4. מיזוג ומיון ראשוני ---
-    print("Processing main log...")
+    # --- 4. מיזוג ומיון ---
     df_new = pd.DataFrame(new_articles)
     if not df_new.empty:
         df_new['normalized_url'] = df_new['Article URL'].apply(normalize_url)
+        # תרגום כותרות
         translator = GoogleTranslator(source='en', target='iw')
-        
         for idx, row in df_new.iterrows():
              if any(c.isalpha() and c.isascii() for c in row['Title']):
                 try: df_new.at[idx, 'Title'] = translator.translate(row['Title'])
                 except: pass
         
+        # שמירת תאריך מקורי
         def fix_date_if_exists(row):
             if row['normalized_url'] in url_to_original_date:
                 return url_to_original_date[row['normalized_url']]
@@ -357,80 +383,72 @@ def background_process():
     if not df_combined.empty:
         df_combined = df_combined.drop_duplicates(subset=['normalized_url'], keep='first')
 
+        # --- לוגיקת עדיפות מתוקנת ---
         def calculate_priority(row):
             norm_url = row['normalized_url']
+            
+            # עדיפות 4: כתבה שכבר ראינו בעבר
             if norm_url in old_urls_set: return 4
-            if row.get('Is_User_Site', False): return 1
-            if any(ps in row['Article URL'] for ps in priority_sites): return 1
-            region = row.get('Region', '')
-            if region == 'Global': return 2
+            
+            # עדיפות 1: אתר שהמשתמש ביקש (בין אם הגיע ישירות או דרך Google News)
+            # בודקים אם הדומיין של הכתבה נמצא ברשימת הדומיינים של המשתמש
+            article_domain = extract_domain_name(row['Site URL'])
+            if row.get('Is_User_Site', False) or article_domain in user_domains:
+                return 1
+            
+            # בדיקה נוספת למקרה שהדומיין מופיע בתוך ה-URL עצמו
+            for ud in user_domains:
+                if ud and ud in row['Article URL'].lower():
+                    return 1
+
+            if row.get('Region', '') == 'Global': return 2
             return 3 
 
         df_combined['Sort_Priority'] = df_combined.apply(calculate_priority, axis=1)
         df_combined = df_combined.sort_values(by=['Keyword', 'Sort_Priority', 'Date'], ascending=[True, True, False])
 
 
-    # --- 5. ניתוח עם ג'ימיני (מבוצע על כל הכתבות, לא רק על החדשות) ---
-    # נבצע ניתוח רק למילות מפתח שבהן יש כתבות חדשות בסריקה הזו, כדי לחסוך API
-    keywords_with_new_data = set(df_new['Keyword'].unique()) if not df_new.empty else set()
-    
+    # --- 5. ניתוח עם ג'ימיני ---
     if GOOGLE_API_KEY and not df_combined.empty:
-        print("Starting Gemini analysis for updated keywords...")
+        print("Starting Gemini analysis...")
         
-        # קריאת החלטות קיימות
         existing_decisions = ws_decisions.get_all_values()
         decision_header = ["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"]
-        
-        # יצירת מילון: מפתח=מילת מפתח, ערך=שורה
-        # כך נוכל לדרוס ישנים
-        decision_map = {}
-        if len(existing_decisions) > 1:
-            for r in existing_decisions[1:]:
-                if r and len(r) >= 2:
-                    decision_map[r[1]] = r # r[1] is Keyword
+        decision_map = {r[1]: r for r in existing_decisions[1:] if r and len(r) >= 2}
 
+        keywords_with_new_data = set(df_new['Keyword'].unique()) if not df_new.empty else set()
+        force_update_all = len(existing_decisions) < 2
         grouped_combined = df_combined.groupby('Keyword')
-        
+        changes_made = False
+
         for kw, group in grouped_combined:
-            # מנתחים רק אם יש כתבות חדשות למילה הזו, או שהמילה עדיין לא קיימת בהחלטות
-            if kw in keywords_with_new_data or kw not in decision_map:
-                articles_list = group[['Title', 'Site URL', 'Date']].to_dict('records')
-                print(f"Analyzing '{kw}' with {len(articles_list)} TOTAL articles...")
+            if kw in keywords_with_new_data or kw not in decision_map or force_update_all:
+                articles_list = group[['Title', 'Site URL']].to_dict('records')
                 
+                # ניתוח
                 analysis = analyze_market_sentiment(kw, articles_list)
                 
                 if analysis:
-                    print(f"--> Decision for {kw}: {analysis.get('recommendation')}")
-                    # עדכון המילון
-                    decision_map[kw] = [
-                        cur_time,
-                        kw,
-                        analysis.get('recommendation', 'N/A'),
-                        analysis.get('explanation', ''),
-                        len(articles_list)
-                    ]
-                    # השהיה כדי למנוע חסימת API
-                    time.sleep(4)
+                    print(f"--> Success: Decision for {kw}")
+                    decision_map[kw] = [cur_time, kw, analysis.get('recommendation', 'N/A'), analysis.get('explanation', ''), len(articles_list)]
+                    changes_made = True
+                    time.sleep(10) # הגדלת ההמתנה ל-10 שניות בין מילים באופן קבוע
                 else:
-                    print(f"--> Failed to analyze {kw}")
-            else:
-                pass # מדלגים על ניתוח כי אין מידע חדש
+                    print(f"--> Failed to analyze {kw} after retries.")
 
-        # כתיבה חזרה לגיליון החלטות (מוחק הכל וכותב מחדש את המילון המעודכן)
-        if decision_map:
-            print("Updating Decisions sheet...")
+        if changes_made:
             rows_to_write = [decision_header] + list(decision_map.values())
             ws_decisions.clear()
             ws_decisions.update(rows_to_write)
     
-    # --- 6. כתיבת לוג סופי (הצגת 20 עליונות) ---
+    # --- 6. כתיבת לוג סופי ---
     if not df_combined.empty:
         final_rows = [["תאריך ושעה", "מילת מפתח", "קישור לכתבה", "שם האתר", "כותרת"]]
         truly_new_keywords = set()
 
         grouped = df_combined.groupby('Keyword', sort=False)
         for kw, group in grouped:
-            top_20 = group.head(20) # רק לתצוגה במיין לוג
+            top_20 = group.head(20)
             if any(top_20['Sort_Priority'] < 4): truly_new_keywords.add(kw)
             for _, row in top_20.iterrows():
                 final_rows.append([row['Date'], row['Keyword'], row['Article URL'], row['Site URL'], row['Title']])
@@ -443,8 +461,6 @@ def background_process():
         if truly_new_keywords:
             kws_str = ", ".join(list(truly_new_keywords))
             send_notification(f"חדש: {kws_str}")
-        else:
-            print("No new priority articles.")
 
     update_header_color(ws_kwd, "green", "B")
     update_header_color(ws_sites, "green", "B")
