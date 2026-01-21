@@ -268,7 +268,7 @@ def analyze_all_keywords_market_sentiment(grouped_articles):
         """
     try:
         response = client.models.generate_content(
-            model="models/gemini-1.5-flash",
+            model="models/gemini-2.5-flash",
             contents=prompt
         )
 
@@ -474,21 +474,21 @@ def background_process():
                 ""
             ])
             print("Gemini error – decisions sheet overwritten")
-            return
 
-        now = get_il_time()
-        rows = []
+        else:
+            now = get_il_time()
+            rows = []
 
-        for kw, data in analysis_result.items():
-            rows.append([
-                now,
-                kw,
-                data.get("recommendation", "N/A"),
-                data.get("explanation", ""),
-                data.get("count", 0)
-            ])
+            for kw, data in analysis_result.items():
+                rows.append([
+                    now,
+                    kw,
+                    data.get("recommendation", "N/A"),
+                    data.get("explanation", ""),
+                    data.get("count", 0)
+                ])
 
-        ws_decisions.append_rows(rows)
+            ws_decisions.append_rows(rows)
 
     
     # --- 6. כתיבת לוג סופי ---
