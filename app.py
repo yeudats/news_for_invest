@@ -17,12 +17,12 @@ from google import genai
 import time
 
 # --- הגדרות ---
-load_dotenv() 
+load_dotenv()
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC_env")
 SHEET_NAME = os.environ.get("SHEET_NAME_env")
 SHEET_LINK = os.environ.get("SHEET_LINK_env")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY") 
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
@@ -32,7 +32,6 @@ IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
 
 # הגדרת ג'ימיני
 if GOOGLE_API_KEY:
-    # הגדרת הלקוח (Client) עם ה-API Key שלך
     client = genai.Client(
         api_key=GOOGLE_API_KEY,
         http_options={'api_version': 'v1'}
@@ -182,24 +181,27 @@ def scrape_single_site(site_data, keywords):
         status = f"Error: {str(e)[:10]}"
     return found, status, row_idx
 
-# --- פונקציית ניתוח עם Gemini (משופרת) ---
+# --- פונקציית ניתוח עם Gemini ---
 def analyze_market_sentiment(keyword, articles):
     if not GOOGLE_API_KEY:
         print("Error: No API Key for Gemini.")
         return None
 
     try:
-        
-        articles_text = "\n".join([f"- {a['Title']} (Source: {a['Site URL']})" for a in articles])
+        # מגבלה: נשלח מקסימום 50 כותרות כדי לא להעמיס יותר מדי על הפרומפט
+        articles_to_send = articles[:50] 
+        articles_text = "\n".join([f"- {a['Title']} (Source: {a['Site URL']}, Date: {a.get('Date', 'N/A')})" for a in articles_to_send])
         
         prompt = f"""
         You are an expert financial analyst. 
         Analyze the following news headlines regarding the company/topic: "{keyword}".
-        
+        Total articles found: {len(articles)}. Displaying titles for analysis below:
+
         Headlines:
         {articles_text}
         
-        Based ONLY on these headlines, decide on a stock recommendation (Buy, Sell, Hold, Strong Buy, Strong Sell).
+        Based on these headlines (and the sentiment of the text), decide on a stock recommendation (Buy, Sell, Hold, Strong Buy, Strong Sell).
+        If the news are neutral or old, lean towards 'Hold'.
         Provide a short explanation (max 3 sentences) in Hebrew.
         
         Output JSON:
@@ -210,11 +212,10 @@ def analyze_market_sentiment(keyword, articles):
         """
         
         response = client.models.generate_content(
-                model="models/gemini-2.5-flash", 
+                model="models/gemini-2.0-flash", 
                 contents=prompt
             )
         
-        # תיקון וניקוי JSON ליתר ביטחון
         text_resp = response.text.strip()
         if text_resp.startswith("```json"):
             text_resp = text_resp[7:]
@@ -225,9 +226,6 @@ def analyze_market_sentiment(keyword, articles):
         return data
     except Exception as e:
         print(f"Gemini Critical Error for {keyword}: {e}")
-        # במקרה של שגיאה, הדפס את התגובה הגולמית כדי שנבין מה קרה
-        try: print(f"Raw response: {response.text}") 
-        except: pass
         return None
 
 def background_process():
@@ -336,51 +334,7 @@ def background_process():
 
     print(f"Total articles found (before filter): {len(new_articles)}")
 
-    # --- 4. ניתוח עם ג'ימיני ---
-    if new_articles and GOOGLE_API_KEY:
-        print("Starting Gemini analysis...")
-        df_gemini = pd.DataFrame(new_articles)
-        grouped_gemini = df_gemini.groupby('Keyword')
-        
-        decisions_to_add = []
-        
-        for kw, group in grouped_gemini:
-            # כאן אנחנו שולחים לניתוח רק אם יש כתבות
-            articles_list = group[['Title', 'Site URL']].to_dict('records')
-            print(f"Analyzing '{kw}' with {len(articles_list)} articles...")
-            
-            analysis = analyze_market_sentiment(kw, articles_list)
-            
-            if analysis:
-                print(f"--> Decision for {kw}: {analysis.get('recommendation')}")
-                row = [
-                    cur_time,
-                    kw,
-                    analysis.get('recommendation', 'N/A'),
-                    analysis.get('explanation', ''),
-                    len(articles_list)
-                ]
-                decisions_to_add.append(row)
-                time.sleep(1)
-            else:
-                print(f"--> Failed to analyze {kw}")
-
-        # עדכון גליון החלטות
-        if decisions_to_add:
-            print(f"Updating Decisions sheet with {len(decisions_to_add)} rows...")
-            current_decisions = ws_decisions.get_all_values()
-            header = current_decisions[0] if current_decisions else ["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"]
-            existing_rows = current_decisions[1:] if len(current_decisions) > 1 else []
-            
-            new_content = [header] + decisions_to_add + existing_rows
-            ws_decisions.clear()
-            ws_decisions.update(new_content)
-        else:
-            print("No decisions to add.")
-    else:
-        print("Skipping Gemini (No articles or No API Key)")
-
-    # --- 5. מיזוג ומיון ללוג הראשי ---
+    # --- 4. מיזוג ומיון ראשוני ---
     print("Processing main log...")
     df_new = pd.DataFrame(new_articles)
     if not df_new.empty:
@@ -415,12 +369,68 @@ def background_process():
         df_combined['Sort_Priority'] = df_combined.apply(calculate_priority, axis=1)
         df_combined = df_combined.sort_values(by=['Keyword', 'Sort_Priority', 'Date'], ascending=[True, True, False])
 
+
+    # --- 5. ניתוח עם ג'ימיני (מבוצע על כל הכתבות, לא רק על החדשות) ---
+    # נבצע ניתוח רק למילות מפתח שבהן יש כתבות חדשות בסריקה הזו, כדי לחסוך API
+    keywords_with_new_data = set(df_new['Keyword'].unique()) if not df_new.empty else set()
+    
+    if GOOGLE_API_KEY and not df_combined.empty:
+        print("Starting Gemini analysis for updated keywords...")
+        
+        # קריאת החלטות קיימות
+        existing_decisions = ws_decisions.get_all_values()
+        decision_header = ["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"]
+        
+        # יצירת מילון: מפתח=מילת מפתח, ערך=שורה
+        # כך נוכל לדרוס ישנים
+        decision_map = {}
+        if len(existing_decisions) > 1:
+            for r in existing_decisions[1:]:
+                if r and len(r) >= 2:
+                    decision_map[r[1]] = r # r[1] is Keyword
+
+        grouped_combined = df_combined.groupby('Keyword')
+        
+        for kw, group in grouped_combined:
+            # מנתחים רק אם יש כתבות חדשות למילה הזו, או שהמילה עדיין לא קיימת בהחלטות
+            if kw in keywords_with_new_data or kw not in decision_map:
+                articles_list = group[['Title', 'Site URL', 'Date']].to_dict('records')
+                print(f"Analyzing '{kw}' with {len(articles_list)} TOTAL articles...")
+                
+                analysis = analyze_market_sentiment(kw, articles_list)
+                
+                if analysis:
+                    print(f"--> Decision for {kw}: {analysis.get('recommendation')}")
+                    # עדכון המילון
+                    decision_map[kw] = [
+                        cur_time,
+                        kw,
+                        analysis.get('recommendation', 'N/A'),
+                        analysis.get('explanation', ''),
+                        len(articles_list)
+                    ]
+                    # השהיה כדי למנוע חסימת API
+                    time.sleep(4)
+                else:
+                    print(f"--> Failed to analyze {kw}")
+            else:
+                pass # מדלגים על ניתוח כי אין מידע חדש
+
+        # כתיבה חזרה לגיליון החלטות (מוחק הכל וכותב מחדש את המילון המעודכן)
+        if decision_map:
+            print("Updating Decisions sheet...")
+            rows_to_write = [decision_header] + list(decision_map.values())
+            ws_decisions.clear()
+            ws_decisions.update(rows_to_write)
+    
+    # --- 6. כתיבת לוג סופי (הצגת 20 עליונות) ---
+    if not df_combined.empty:
         final_rows = [["תאריך ושעה", "מילת מפתח", "קישור לכתבה", "שם האתר", "כותרת"]]
         truly_new_keywords = set()
 
         grouped = df_combined.groupby('Keyword', sort=False)
         for kw, group in grouped:
-            top_20 = group.head(20)
+            top_20 = group.head(20) # רק לתצוגה במיין לוג
             if any(top_20['Sort_Priority'] < 4): truly_new_keywords.add(kw)
             for _, row in top_20.iterrows():
                 final_rows.append([row['Date'], row['Keyword'], row['Article URL'], row['Site URL'], row['Title']])
