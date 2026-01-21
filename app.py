@@ -22,7 +22,7 @@ load_dotenv()
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC_env")
 SHEET_NAME = os.environ.get("SHEET_NAME_env")
 SHEET_LINK = os.environ.get("SHEET_LINK_env")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY") # מפתח ג'ימיני
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY") 
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
@@ -33,6 +33,8 @@ IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
 # הגדרת ג'ימיני
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
+else:
+    print("WARNING: GOOGLE_API_KEY is missing!")
 
 # --- פונקציות עזר ---
 
@@ -176,15 +178,19 @@ def scrape_single_site(site_data, keywords):
         status = f"Error: {str(e)[:10]}"
     return found, status, row_idx
 
-# --- פונקציית ניתוח עם Gemini ---
+# --- פונקציית ניתוח עם Gemini (משופרת) ---
 def analyze_market_sentiment(keyword, articles):
     if not GOOGLE_API_KEY:
+        print("Error: No API Key for Gemini.")
         return None
 
     try:
-        model = genai.GenerativeModel('gemini-2.0-flash')
+        # שימוש במודל יציב 1.5-flash
+        model = genai.GenerativeModel(
+            'gemini-1.5-flash',
+            generation_config={"response_mime_type": "application/json"}
+        )
         
-        # בניית רשימת כותרות לניתוח
         articles_text = "\n".join([f"- {a['Title']} (Source: {a['Site URL']})" for a in articles])
         
         prompt = f"""
@@ -197,7 +203,7 @@ def analyze_market_sentiment(keyword, articles):
         Based ONLY on these headlines, decide on a stock recommendation (Buy, Sell, Hold, Strong Buy, Strong Sell).
         Provide a short explanation (max 3 sentences) in Hebrew.
         
-        Return the result in this exact JSON format (no markdown):
+        Output JSON:
         {{
             "recommendation": "YOUR_RECOMMENDATION",
             "explanation": "YOUR_EXPLANATION_IN_HEBREW"
@@ -205,11 +211,20 @@ def analyze_market_sentiment(keyword, articles):
         """
         
         response = model.generate_content(prompt)
-        text_resp = response.text.replace('```json', '').replace('```', '').strip()
+        # תיקון וניקוי JSON ליתר ביטחון
+        text_resp = response.text.strip()
+        if text_resp.startswith("```json"):
+            text_resp = text_resp[7:]
+        if text_resp.endswith("```"):
+            text_resp = text_resp[:-3]
+            
         data = json.loads(text_resp)
         return data
     except Exception as e:
-        print(f"Gemini Error for {keyword}: {e}")
+        print(f"Gemini Critical Error for {keyword}: {e}")
+        # במקרה של שגיאה, הדפס את התגובה הגולמית כדי שנבין מה קרה
+        try: print(f"Raw response: {response.text}") 
+        except: pass
         return None
 
 def background_process():
@@ -217,7 +232,6 @@ def background_process():
     client = get_sheet_client()
     sh = client.open(SHEET_NAME)
     
-    # פתיחת גליונות (יוצר גליון החלטות אם לא קיים)
     ws_kwd = sh.worksheet("מילות מפתח")
     ws_sites = sh.worksheet("אתרים לחיפוש")
     ws_log = sh.worksheet("תוצאות החיפוש")
@@ -234,6 +248,7 @@ def background_process():
     update_header_color(ws_decisions, "red", "E")
 
     # --- 1. טעינת היסטוריה ---
+    print("Loading history...")
     existing_data = ws_log.get_all_values()
     df_old = pd.DataFrame()
     col_map = {"תאריך ושעה": "Date", "מילת מפתח": "Keyword", "קישור לכתבה": "Article URL", "שם האתר": "Site URL", "כותרת": "Title"}
@@ -242,7 +257,6 @@ def background_process():
     if len(existing_data) > 1:
         headers_row = existing_data[0]
         if len(headers_row) > 3: headers_row[3] = "שם האתר"
-        
         data_rows = [r for r in existing_data[1:] if r and len(r) > 2 and r[2]]
         if data_rows:
             temp_df = pd.DataFrame(data_rows, columns=headers_row).rename(columns=col_map)
@@ -283,6 +297,7 @@ def background_process():
     if updates: ws_kwd.batch_update(updates)
 
     # --- 3. סריקה חדשה ---
+    print(f"Scraping sites for {len(keywords)} keywords...")
     new_articles = []
     priority_sites = [r[0] for r in ws_sites.get_all_values()[1:] if r and r[0].startswith('http')]
     sites_data = [(url, i) for i, url in enumerate(priority_sites, 2)]
@@ -305,7 +320,6 @@ def background_process():
                 for entry in feed.entries[:10]:
                     real_source = extract_site_name(entry.link, entry.title, is_google_news=True)
                     clean_title_text = clean_title_google_news(entry.title)
-                    
                     new_articles.append({
                         'Date': cur_time, 
                         'Keyword': he if he else en,
@@ -317,20 +331,25 @@ def background_process():
                     })
             except: pass
 
-    # --- 4. ניתוח עם ג'ימיני (עבור כתבות חדשות שנמצאו בריצה זו) ---
+    print(f"Total articles found (before filter): {len(new_articles)}")
+
+    # --- 4. ניתוח עם ג'ימיני ---
     if new_articles and GOOGLE_API_KEY:
-        print("Analyzing with Gemini...")
+        print("Starting Gemini analysis...")
         df_gemini = pd.DataFrame(new_articles)
         grouped_gemini = df_gemini.groupby('Keyword')
         
         decisions_to_add = []
         
         for kw, group in grouped_gemini:
-            # שליחה לג'ימיני - ניתוח כל הכתבות שנמצאו עכשיו
+            # כאן אנחנו שולחים לניתוח רק אם יש כתבות
             articles_list = group[['Title', 'Site URL']].to_dict('records')
+            print(f"Analyzing '{kw}' with {len(articles_list)} articles...")
+            
             analysis = analyze_market_sentiment(kw, articles_list)
             
             if analysis:
+                print(f"--> Decision for {kw}: {analysis.get('recommendation')}")
                 row = [
                     cur_time,
                     kw,
@@ -339,21 +358,27 @@ def background_process():
                     len(articles_list)
                 ]
                 decisions_to_add.append(row)
-                time.sleep(1) # מניעת עומס על ה-API
-        
-        # עדכון גליון החלטות (הוספה בראש הטבלה)
+                time.sleep(1)
+            else:
+                print(f"--> Failed to analyze {kw}")
+
+        # עדכון גליון החלטות
         if decisions_to_add:
+            print(f"Updating Decisions sheet with {len(decisions_to_add)} rows...")
             current_decisions = ws_decisions.get_all_values()
-            # שמירת הכותרת ושורות קיימות
             header = current_decisions[0] if current_decisions else ["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"]
             existing_rows = current_decisions[1:] if len(current_decisions) > 1 else []
             
-            # מיזוג: חדשים למעלה + ישנים
             new_content = [header] + decisions_to_add + existing_rows
             ws_decisions.clear()
             ws_decisions.update(new_content)
+        else:
+            print("No decisions to add.")
+    else:
+        print("Skipping Gemini (No articles or No API Key)")
 
     # --- 5. מיזוג ומיון ללוג הראשי ---
+    print("Processing main log...")
     df_new = pd.DataFrame(new_articles)
     if not df_new.empty:
         df_new['normalized_url'] = df_new['Article URL'].apply(normalize_url)
