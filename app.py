@@ -191,7 +191,19 @@ def scrape_single_site(site_data, keywords):
             for a in links:
                 t = a.get_text(" ", strip=True)
                 l = urljoin(url, a['href'])
-                if len(t) < 5: continue
+                if len(t) < 10: continue
+                # קודם בדיקה בכותרת
+                for he, en in keywords:
+                    if (he and he.lower() in t.lower()) or (en and en.lower() in t.lower()):
+                        found.append({
+                            'Date': current_time_str,
+                            'Keyword': he if he else en,
+                            'Article URL': l,
+                            'Site URL': extract_site_name(url),
+                            'Title': t,
+                            'Is_User_Site': True
+                        })
+                        break
                 match, kw = check_keyword_in_article_body(l, keywords)
                 if match:
                     site_name = extract_site_name(url)
@@ -208,51 +220,72 @@ def scrape_single_site(site_data, keywords):
     except Exception as e:
         status = f"Err: {str(e)[:15]}"
 
+    if status == "OK" and not found:
+        status = "Active (no matches)"
+
     return found, status, row_idx
 
 # --- פונקציית ניתוח עם Gemini ---
-def analyze_market_sentiment(keyword, articles):
+def analyze_all_keywords_market_sentiment(grouped_articles):
     if not GOOGLE_API_KEY:
-        return None
+        return {"error": "Missing GOOGLE_API_KEY"}
 
-    # הגבלה ל-25 כתבות כדי לחסוך בטוקנים ולמנוע חסימה
-    articles_to_send = articles[:25] 
-    articles_text = "\n".join([f"- {a['Title']} (Source: {a['Site URL']})" for a in articles_to_send])
-    
+    blocks = []
+    for kw, articles in grouped_articles.items():
+        headlines = "\n".join(
+            [f"- {a['Title']} (Source: {a['Site URL']})" for a in articles[:25]]
+        )
+        blocks.append(f"""
+### Keyword: {kw}
+Headlines:
+{headlines}
+""")
+
     prompt = f"""
-    You are a financial analyst. Analyze these headlines for: "{keyword}".
-    Headlines:
-    {articles_text}
-    
-    Output JSON only:
-    {{
-        "recommendation": "Buy/Sell/Hold/Strong Buy/Strong Sell",
-        "explanation": "Short explanation in Hebrew (max 2 sentences)."
-    }}
-    """
+You are a senior financial analyst.
 
-    for attempt in range(3): # ניסיון חוזר עד 3 פעמים
+Analyze the following news grouped by keyword.
+Return JSON ONLY.
+
+Rules:
+- Analyze EACH keyword separately
+- Always return ALL keywords you received
+- Short Hebrew explanation (max 2 sentences)
+
+Output format:
+{{
+  "KEYWORD": {{
+    "recommendation": "Buy/Sell/Hold/Strong Buy/Strong Sell",
+    "explanation": "Hebrew explanation",
+    "count": NUMBER_OF_ARTICLES
+  }}
+}}
+
+DATA:
+{''.join(blocks)}
+"""
+
+    for attempt in range(3):
         try:
             response = client.models.generate_content(
-                model="gemini-1.5-flash-8b", # מודל חסכוני יותר
+                model="gemini-1.5-flash-8b",
                 contents=prompt
             )
-            
-            text_resp = response.text.strip()
-            if text_resp.startswith("```json"): text_resp = text_resp[7:]
-            if text_resp.endswith("```"): text_resp = text_resp[:-3]
-            return json.loads(text_resp)
+
+            text = response.text.strip()
+            if text.startswith("```json"): text = text[7:]
+            if text.endswith("```"): text = text[:-3]
+
+            return json.loads(text)
 
         except Exception as e:
             if "429" in str(e):
-                print(f"Rate limit hit for {keyword}. Waiting 60 seconds...")
-                time.sleep(60) # המתנה של דקה בגלל חריגת מכסה
+                time.sleep(60)
                 continue
-            print(f"Gemini Error {keyword}: {e}")
-            if attempt == 2:
-                return {"error": str(e)}
-            break
-    return None
+            return {"error": str(e)}
+
+    return {"error": "Gemini failed after retries"}
+
 
 def background_process():
     print("Starting process...")
@@ -418,52 +451,47 @@ def background_process():
 
         df_combined['Sort_Priority'] = df_combined.apply(calculate_priority, axis=1)
         df_combined = df_combined.sort_values(by=['Keyword', 'Sort_Priority', 'Date'], ascending=[True, True, False])
+        grouped_for_gemini = {}
+        for kw, group in df_combined.groupby("Keyword"):
+            grouped_for_gemini[kw] = group[['Title', 'Site URL']].to_dict('records')
 
 
     # --- 5. ניתוח עם ג'ימיני ---
-    if GOOGLE_API_KEY and not df_combined.empty:
-        print("Starting Gemini analysis...")
-        
-        existing_decisions = ws_decisions.get_all_values()
-        decision_header = ["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"]
-        decision_map = {r[1]: r for r in existing_decisions[1:] if r and len(r) >= 2}
+    if GOOGLE_API_KEY and grouped_for_gemini:
+        print("Sending ALL keywords to Gemini in one request...")
 
-        keywords_with_new_data = set(df_new['Keyword'].unique()) if not df_new.empty else set()
-        force_update_all = len(existing_decisions) < 2
-        grouped_combined = df_combined.groupby('Keyword')
-        changes_made = False
+        analysis_result = analyze_all_keywords_market_sentiment(grouped_for_gemini)
 
-        for kw, group in grouped_combined:
-            if kw in keywords_with_new_data or kw not in decision_map or force_update_all:
-                articles_list = group[['Title', 'Site URL']].to_dict('records')
-                
-                # ניתוח
-                analysis = analyze_market_sentiment(kw, articles_list)
+        ws_decisions.clear()
+        ws_decisions.append_row(
+            ["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר להמלצה", "כמות כתבות"]
+        )
 
-                if analysis and "error" in analysis:
-                    ws_decisions.clear()
-                    ws_decisions.append_row([
-                        get_il_time(),
-                        kw,
-                        "BLOCKED",
-                        analysis["error"][:100],
-                        len(articles_list)
-                    ])
-                    print("Gemini blocked – decisions sheet overwritten")
-                    return  # עצירה מוחלטת
-                
-                if analysis:
-                    print(f"--> Success: Decision for {kw}")
-                    decision_map[kw] = [cur_time, kw, analysis.get('recommendation', 'N/A'), analysis.get('explanation', ''), len(articles_list)]
-                    changes_made = True
-                    time.sleep(10) # הגדלת ההמתנה ל-10 שניות בין מילים באופן קבוע
-                else:
-                    print(f"--> Failed to analyze {kw} after retries.")
+        if "error" in analysis_result:
+            ws_decisions.append_row([
+                get_il_time(),
+                "ERROR",
+                "BLOCKED",
+                analysis_result["error"][:200],
+                ""
+            ])
+            print("Gemini error – decisions sheet overwritten")
+            return
 
-        if changes_made:
-            rows_to_write = [decision_header] + list(decision_map.values())
-            ws_decisions.clear()
-            ws_decisions.update(rows_to_write)
+        now = get_il_time()
+        rows = []
+
+        for kw, data in analysis_result.items():
+            rows.append([
+                now,
+                kw,
+                data.get("recommendation", "N/A"),
+                data.get("explanation", ""),
+                data.get("count", 0)
+            ])
+
+        ws_decisions.append_rows(rows)
+
     
     # --- 6. כתיבת לוג סופי ---
     if not df_combined.empty:
