@@ -211,8 +211,7 @@ def analyze_market_sentiment(keyword, articles):
         
         response = client.models.generate_content(
                 model="models/gemini-2.5-flash", 
-                contents=prompt,
-                generation_config={"response_mime_type": "application/json"}
+                contents=prompt
             )
         
         # תיקון וניקוי JSON ליתר ביטחון
