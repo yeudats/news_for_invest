@@ -13,7 +13,7 @@ import pytz
 from urllib.parse import quote, urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
-import google.generativeai as genai
+from google import genai
 import time
 
 # --- הגדרות ---
@@ -32,7 +32,11 @@ IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
 
 # הגדרת ג'ימיני
 if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
+    # הגדרת הלקוח (Client) עם ה-API Key שלך
+    client = genai.Client(
+        api_key="AIzaSyDqhOltrYuUnIvmkTMx68idiVGBr4mDUxE",
+        http_options={'api_version': 'v1'}
+        )
 else:
     print("WARNING: GOOGLE_API_KEY is missing!")
 
@@ -185,11 +189,6 @@ def analyze_market_sentiment(keyword, articles):
         return None
 
     try:
-        # שימוש במודל יציב 1.5-flash
-        model = genai.GenerativeModel(
-            'gemini-1.5-flash',
-            generation_config={"response_mime_type": "application/json"}
-        )
         
         articles_text = "\n".join([f"- {a['Title']} (Source: {a['Site URL']})" for a in articles])
         
@@ -210,7 +209,12 @@ def analyze_market_sentiment(keyword, articles):
         }}
         """
         
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+                model="models/gemini-2.5-flash", 
+                contents=prompt,
+                generation_config={"response_mime_type": "application/json"}
+            )
+        
         # תיקון וניקוי JSON ליתר ביטחון
         text_resp = response.text.strip()
         if text_resp.startswith("```json"):
