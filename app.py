@@ -236,55 +236,53 @@ def analyze_all_keywords_market_sentiment(grouped_articles):
             [f"- {a['Title']} (Source: {a['Site URL']})" for a in articles[:25]]
         )
         blocks.append(f"""
-### Keyword: {kw}
-Headlines:
-{headlines}
-""")
+            ### Keyword: {kw}
+            Headlines:
+            {headlines}
+            """)
+
+
 
     prompt = f"""
-You are a senior financial analyst.
+        You are a senior financial analyst.
 
-Analyze the following news grouped by keyword.
-Return JSON ONLY.
+        Analyze the following news grouped by keyword.
+        Return JSON ONLY.
 
-Rules:
-- Analyze EACH keyword separately
-- Always return ALL keywords you received
-- Short Hebrew explanation (max 2 sentences)
+        Rules:
+        - Analyze EACH keyword separately
+        - Always return ALL keywords you received
+        - Short Hebrew explanation (max 2 sentences)
 
-Output format:
-{{
-  "KEYWORD": {{
-    "recommendation": "Buy/Sell/Hold/Strong Buy/Strong Sell",
-    "explanation": "Hebrew explanation",
-    "count": NUMBER_OF_ARTICLES
-  }}
-}}
+        Output format:
+            {{
+                "KEYWORD": {{
+                    "recommendation": "Buy/Sell/Hold/Strong Buy/Strong Sell",
+                    "explanation": "Hebrew explanation",
+                    "count": NUMBER_OF_ARTICLES
+                }}
+            }}
 
-DATA:
-{''.join(blocks)}
-"""
+        DATA:
+            {''.join(blocks)}
+        """
+    try:
+        response = client.models.generate_content(
+            model="models/gemini-1.5-flash",
+            contents=prompt
+        )
 
-    for attempt in range(3):
-        try:
-            response = client.models.generate_content(
-                model="Gemini-1.5-Flash",
-                contents=prompt
-            )
+        text = response.text.strip()
+        if text.startswith("```json"): text = text[7:]
+        if text.endswith("```"): text = text[:-3]
 
-            text = response.text.strip()
-            if text.startswith("```json"): text = text[7:]
-            if text.endswith("```"): text = text[:-3]
+        return json.loads(text)
 
-            return json.loads(text)
+    except Exception as e:
+        return {"error": str(e)}
+    
+    # return {"error": "Unknown error during Gemini analysis"}
 
-        except Exception as e:
-            if "429" in str(e):
-                time.sleep(60)
-                continue
-            return {"error": str(e)}
-
-    return {"error": "Gemini failed after retries"}
 
 
 def background_process():
