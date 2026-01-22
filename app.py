@@ -34,8 +34,7 @@ IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
 # הגדרת ג'ימיני
 if GOOGLE_API_KEY:
     client = genai.Client(
-        api_key=GOOGLE_API_KEY,
-        http_options={'api_version': 'v1'}
+        api_key=GOOGLE_API_KEY
         )
 else:
     print("WARNING: GOOGLE_API_KEY is missing!")
@@ -268,7 +267,7 @@ def analyze_all_keywords_market_sentiment(grouped_articles):
         """
     try:
         response = client.models.generate_content(
-            model="models/gemini-2.5-flash",
+            model="gemini-flash-latest",
             contents=prompt
         )
 
