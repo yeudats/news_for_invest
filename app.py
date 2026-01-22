@@ -232,7 +232,7 @@ def analyze_all_keywords_market_sentiment(grouped_articles):
     blocks = []
     for kw, articles in grouped_articles.items():
         headlines = "\n".join(
-            [f"- {a['Title']} (Source: {a['Site URL']})" for a in articles[:25]]
+            [f"- {a['Title']} (Source: {a['Site URL']})" for a in articles[:5]]
         )
         blocks.append(f"""
             ### Keyword: {kw}
@@ -292,7 +292,7 @@ def background_process():
     ws_kwd = sh.worksheet("מילות מפתח")
     ws_sites = sh.worksheet("אתרים לחיפוש")
     ws_log = sh.worksheet("תוצאות החיפוש")
-    
+    grouped_for_gemini = {}
     try:
         ws_decisions = sh.worksheet("החלטות")
     except:
@@ -448,7 +448,7 @@ def background_process():
 
         df_combined['Sort_Priority'] = df_combined.apply(calculate_priority, axis=1)
         df_combined = df_combined.sort_values(by=['Keyword', 'Sort_Priority', 'Date'], ascending=[True, True, False])
-        grouped_for_gemini = {}
+        
         for kw, group in df_combined.groupby("Keyword"):
             grouped_for_gemini[kw] = group[['Title', 'Site URL']].to_dict('records')
 
