@@ -79,6 +79,12 @@ def get_sheet_client():
 
     return gspread.authorize(creds)
 
+def color_header(ws, color):
+    fmt = {
+        "backgroundColor": color,
+        "textFormat": {"bold": True}
+    }
+    ws.format("1:1", fmt)
 
 # =========================
 # סריקת HTML אמיתית
@@ -208,63 +214,72 @@ def main():
     ws_log = sh.worksheet("תוצאות החיפוש")
     ws_dec = sh.worksheet("החלטות")
 
-    # מילות מפתח
-    keywords = []
-    for r in ws_kw.get_all_values()[1:]:
-        if r and (r[0] or r[1]):
-            keywords.append((r[0], r[1]))
+    for ws in [ws_kw, ws_sites, ws_log, ws_dec]:
+        color_header(ws, {"red": 1, "green": 0.8, "blue": 0.8})
 
-    # אתרים
-    sites_data = [
-        (row[0], idx)
-        for idx,row in enumerate(ws_sites.get_all_values()[1:], start=2)
-        if row and row[0].startswith("http")
-    ]
+    try:
 
-    all_articles = []
-    site_status = {}
+        # מילות מפתח
+        keywords = []
+        for r in ws_kw.get_all_values()[1:]:
+            if r and (r[0] or r[1]):
+                keywords.append((r[0], r[1]))
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = [ex.submit(scrape_single_site, s, keywords) for s in sites_data]
-        for f in as_completed(futures):
-            arts, status, idx = f.result()
-            all_articles.extend(arts)
-            site_status[idx] = status
+        # אתרים
+        sites_data = [
+            (row[0], idx)
+            for idx,row in enumerate(ws_sites.get_all_values()[1:], start=2)
+            if row and row[0].startswith("http")
+        ]
 
-    # עדכון סטטוס אתרים
-    for idx,st in site_status.items():
-        ws_sites.update(f"C{idx}", st)
+        all_articles = []
+        site_status = {}
 
-    df = pd.DataFrame(all_articles)
-    if df.empty:
-        return
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futures = [ex.submit(scrape_single_site, s, keywords) for s in sites_data]
+            for f in as_completed(futures):
+                arts, status, idx = f.result()
+                all_articles.extend(arts)
+                site_status[idx] = status
 
-    df["normalized"] = df["Article URL"].apply(normalize_url)
-    df["Sort_Priority"] = 1
+        # עדכון סטטוס אתרים
+        for idx,st in site_status.items():
+            ws_sites.update(f"C{idx}", st)
 
-    # החלטות
-    ws_dec.clear()
-    ws_dec.append_row(["תאריך","מילת מפתח","המלצה","הסבר","כמות כתבות"])
+        df = pd.DataFrame(all_articles)
+        if df.empty:
+            return
 
-    for kw in df["Keyword"].unique():
-        rec, expl = local_sentiment(kw, df)
-        ws_dec.append_row([
-            get_il_time(),
-            kw,
-            rec,
-            expl,
-            int((df["Keyword"] == kw).sum())
-        ])
+        df["normalized"] = df["Article URL"].apply(normalize_url)
+        df["Sort_Priority"] = 1
 
-    # לוג
-    ws_log.clear()
-    ws_log.append_row(["תאריך","מילת מפתח","קישור","אתר","כותרת"])
-    for _,r in df.iterrows():
-        ws_log.append_row([
-            r["Date"], r["Keyword"], r["Article URL"], r["Site URL"], r["Title"]
-        ])
+        # החלטות
+        ws_dec.clear()
+        ws_dec.append_row(["תאריך","מילת מפתח","המלצה","הסבר","כמות כתבות"])
 
-    send_notification("נמצאו כתבות חדשות")
+        for kw in df["Keyword"].unique():
+            rec, expl = local_sentiment(kw, df)
+            ws_dec.append_row([
+                get_il_time(),
+                kw,
+                rec,
+                expl,
+                int((df["Keyword"] == kw).sum())
+            ])
+
+        # לוג
+        ws_log.clear()
+        ws_log.append_row(["תאריך","מילת מפתח","קישור","אתר","כותרת"])
+        for _,r in df.iterrows():
+            ws_log.append_row([
+                r["Date"], r["Keyword"], r["Article URL"], r["Site URL"], r["Title"]
+            ])
+
+        send_notification("נמצאו כתבות חדשות")
+
+    finally:
+        for ws in [ws_kw, ws_sites, ws_log, ws_dec]:
+            color_header(ws, {"red": 0.8, "green": 1, "blue": 0.8})
 
 if __name__ == "__main__":
     main()
