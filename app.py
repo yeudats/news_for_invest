@@ -55,7 +55,7 @@ NEGATIVE_KEYWORDS = [
 # --- פונקציות עזר ---
 
 def get_il_time():
-    return datetime.now(IL_TIMEZONE).strftime("%d/%m/%Y %H:%M")
+    return datetime.now(IL_TIMEZONE).strftime("%d.%m.%Y  %H:%M")
 
 def extract_domain_name(url):
     try:
@@ -232,14 +232,14 @@ def analyze_sentiment_logic(grouped_articles):
                     score += 1
                     # שומר דוגמה לסיבה (רק פעם אחת למילה)
                     if word not in str(reasons):
-                        reasons.append(f"+{word}")
+                        reasons.append(f"{word}+")
             
             # בדיקת מילים שליליות
             for word in NEGATIVE_KEYWORDS:
                 if word in title:
                     score -= 1
                     if word not in str(reasons):
-                        reasons.append(f"-{word}")
+                        reasons.append(f"{word}-")
 
         # קביעת המלצה על סמך הציון המשוקלל
         recommendation = "לעמוד"
@@ -258,7 +258,7 @@ def analyze_sentiment_logic(grouped_articles):
             recommendation = "למכור"
             sentiment_he = "שלילי (נטייה לירידות)"
             
-        explanation = f"ציון סנטימנט: {score}. מילים שזוהו: {', '.join(reasons[:5])}"
+        explanation = f"ציון סנטימנט: {score[::-1]}. מילים שזוהו: {', '.join(reasons[:5])}"
         if not reasons: explanation = "לא נמצאו מילות מפתח מובהקות בכותרות"
 
         results[kw] = {
