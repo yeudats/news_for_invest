@@ -218,6 +218,7 @@ def main():
     ws_dec = sh.worksheet("החלטות")
 
     for ws in [ws_kw, ws_sites, ws_log, ws_dec]:
+        print(ws, ws.col_count)
         update_header_color(ws, "red", ws.col_count)
 
     try:
