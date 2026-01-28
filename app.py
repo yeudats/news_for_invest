@@ -79,12 +79,15 @@ def get_sheet_client():
 
     return gspread.authorize(creds)
 
-def color_header(ws, color):
-    fmt = {
-        "backgroundColor": color,
-        "textFormat": {"bold": True}
-    }
-    ws.format("1:1", fmt)
+def update_header_color(worksheet, color_type, header_length):
+    if color_type == "red":
+        color = {'red': 1.0, 'green': 0.8, 'blue': 0.8} 
+    else:
+        color = {'red': 0.8, 'green': 1.0, 'blue': 0.8}
+    try:
+        worksheet.format(f"A1:{header_length}1",
+        {"backgroundColor": color, "textFormat": {"bold": True}})
+    except: pass
 
 # =========================
 # סריקת HTML אמיתית
@@ -215,7 +218,7 @@ def main():
     ws_dec = sh.worksheet("החלטות")
 
     for ws in [ws_kw, ws_sites, ws_log, ws_dec]:
-        color_header(ws, {"red": 1, "green": 0.8, "blue": 0.8})
+        update_header_color(ws, "red", ws.col_count)
 
     try:
 
@@ -279,7 +282,7 @@ def main():
 
     finally:
         for ws in [ws_kw, ws_sites, ws_log, ws_dec]:
-            color_header(ws, {"red": 0.8, "green": 1, "blue": 0.8})
+            update_header_color(ws, "green", ws.col_count)
 
 if __name__ == "__main__":
     main()
