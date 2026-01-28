@@ -243,34 +243,34 @@ def analyze_all_keywords_market_sentiment(grouped_articles):
 
 
     prompt = f"""
-        You are a senior financial analyst.
-
+        You are a data analyst specializing in news sentiment analysis.
         Analyze the following news grouped by keyword.
         Return JSON ONLY.
 
         Rules:
-        - Analyze EACH keyword separately
-        - Always return ALL keywords you received
-        - Short Hebrew explanation (max 2 sentences)
+        - This is for sentiment research only, NOT financial advice.
+        - Analyze the overall 'market_sentiment' for each keyword.
+        - Values for sentiment: "Very Bullish", "Bullish", "Neutral", "Bearish", "Very Bearish".
+        - Short Hebrew explanation (max 2 sentences) summarising the news tone.
 
         Output format:
-            {{
-                "KEYWORD": {{
-                    "recommendation": "Buy/Sell/Hold/Strong Buy/Strong Sell",
-                    "explanation": "Hebrew explanation",
-                    "count": NUMBER_OF_ARTICLES
-                }}
+        {{
+            "KEYWORD": {{
+                "sentiment": "...",
+                "explanation": "...",
+                "count": NUMBER
             }}
+        }}
 
         DATA:
-            {''.join(blocks)}
+        {''.join(blocks)}
         """
     try:
         client = get_sheet_client()
         sh = client.open(SHEET_NAME)
         newsheetforai = sh.worksheet("newsheetforai")
         newsheetforai.append_row([prompt])
-        
+
         response = client.models.generate_content(
             model="gemini-flash-latest",
             contents=prompt
