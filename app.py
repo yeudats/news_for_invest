@@ -57,7 +57,7 @@ NEGATIVE_KEYWORDS = [
 # --- פונקציות עזר ---
 
 def get_il_time():
-    return datetime.now(IL_TIMEZONE).strftime("%Y-%m-%d %H:%M")
+    return datetime.now(IL_TIMEZONE).strftime("%d/%m/%Y %H:%M")
 
 def extract_domain_name(url):
     try:
