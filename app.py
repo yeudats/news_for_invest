@@ -62,12 +62,23 @@ def send_notification(msg):
     )
 
 def get_sheet_client():
-    scope = ["https://spreadsheets.google.com/feeds",
-             "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        "credentials.json", scope
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/drive"
+    ]
+
+    creds_json = os.environ.get("GOOGLE_CREDS_JSON")
+
+    if not creds_json:
+        raise RuntimeError("GOOGLE_CREDS_JSON environment variable is missing")
+
+    creds_dict = json.loads(creds_json)
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(
+        creds_dict, scope
     )
+
     return gspread.authorize(creds)
+
 
 # =========================
 # סריקת HTML אמיתית
