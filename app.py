@@ -13,8 +13,6 @@ import pytz
 from urllib.parse import quote, urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
-import time
-import re
 
 # --- הגדרות ---
 load_dotenv()
@@ -244,20 +242,20 @@ def analyze_sentiment_logic(grouped_articles):
                         reasons.append(f"-{word}")
 
         # קביעת המלצה על סמך הציון המשוקלל
-        recommendation = "Neutral"
+        recommendation = "לעמוד"
         sentiment_he = "מעורב/ללא כיוון ברור"
         
         if score >= 3:
-            recommendation = "Very Bullish"
+            recommendation = "לקנות בחוזקה"
             sentiment_he = "חיובי מאוד (זינוקים/רווחים)"
         elif score >= 1:
-            recommendation = "Bullish"
+            recommendation = "לקנות"
             sentiment_he = "חיובי (נטייה לעליות)"
         elif score <= -3:
-            recommendation = "Very Bearish"
+            recommendation = "למכור בחוזקה"
             sentiment_he = "שלילי מאוד (קריסה/הפסדים)"
         elif score <= -1:
-            recommendation = "Bearish"
+            recommendation = "למכור"
             sentiment_he = "שלילי (נטייה לירידות)"
             
         explanation = f"ציון סנטימנט: {score}. מילים שזוהו: {', '.join(reasons[:5])}"
@@ -284,7 +282,7 @@ def background_process():
         ws_decisions = sh.worksheet("החלטות")
     except:
         ws_decisions = sh.add_worksheet(title="החלטות", rows=1000, cols=5)
-        ws_decisions.append_row(["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר", "כמות כתבות"])
+        ws_decisions.append_row(["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר להמלצה", "כמות כתבות"])
 
     update_header_color(ws_kwd, "red", "B")
     update_header_color(ws_sites, "red", "B")
