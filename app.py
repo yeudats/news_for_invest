@@ -258,7 +258,7 @@ def analyze_sentiment_logic(grouped_articles):
             recommendation = "למכור"
             sentiment_he = "שלילי (נטייה לירידות)"
             
-        explanation = f"ציון סנטימנט: {score:+d}. מילים שזוהו: {', '.join(reasons[:5])}"
+        explanation = f"ציון סנטימנט: {score}. מילים שזוהו: {', '.join(reasons[:5])}"
         if not reasons: explanation = "לא נמצאו מילות מפתח מובהקות בכותרות"
 
         results[kw] = {
