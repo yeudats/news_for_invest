@@ -359,7 +359,7 @@ def background_process():
     if site_statuses:
         status_updates = []
         for ridx, stat in site_statuses.items():
-            status_updates.append({'range': f'C{ridx}', 'values': [[stat]]})
+            status_updates.append({'range': f'B{ridx}', 'values': [[stat]]})
         try: ws_sites.batch_update(status_updates)
         except Exception as e: print(f"Status update failed: {e}")
 
