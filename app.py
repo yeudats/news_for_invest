@@ -217,8 +217,10 @@ def main():
     ws_log = sh.worksheet("תוצאות החיפוש")
     ws_dec = sh.worksheet("החלטות")
 
-    for ws in [ws_kw, ws_sites, ws_log, ws_dec]:
-        update_header_color(ws, "red", 'A1')
+    update_header_color(ws_kw, "red", "B")
+    update_header_color(ws_sites, "red", "B")
+    update_header_color(ws_log, "red", "E")
+    update_header_color(ws_dec, "red", "E")
 
     try:
 
@@ -281,8 +283,10 @@ def main():
         send_notification("נמצאו כתבות חדשות")
 
     finally:
-        for ws in [ws_kw, ws_sites, ws_log, ws_dec]:
-            update_header_color(ws, "green", 'A1')
+        update_header_color(ws_kw, "green", "B")
+        update_header_color(ws_sites, "green", "B")
+        update_header_color(ws_log, "green", "E")
+        update_header_color(ws_dec, "green", "E")
 
 if __name__ == "__main__":
     main()
