@@ -266,6 +266,11 @@ def analyze_all_keywords_market_sentiment(grouped_articles):
             {''.join(blocks)}
         """
     try:
+        client = get_sheet_client()
+        sh = client.open(SHEET_NAME)
+        newsheetforai = sh.worksheet("newsheetforai")
+        newsheetforai.append_row([prompt])
+        
         response = client.models.generate_content(
             model="gemini-flash-latest",
             contents=prompt
