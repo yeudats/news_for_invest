@@ -289,7 +289,7 @@ def background_process():
         ws_decisions = sh.add_worksheet(title="החלטות", rows=1000, cols=5)
         ws_decisions.append_row(["תאריך ושעה", "מילת מפתח", "המלצה", "הסבר להמלצה", "כמות כתבות"])
 
-    update_header_color(ws_kwd, "red", "B")
+    update_header_color(ws_kwd, "red", "A")
     update_header_color(ws_sites, "red", "B")
     update_header_color(ws_log, "red", "E")
     update_header_color(ws_decisions, "red", "E")
@@ -461,7 +461,7 @@ def background_process():
             kws_str = ", ".join(list(truly_new_keywords))
             send_notification(f"חדש: {kws_str}")
 
-    update_header_color(ws_kwd, "green", "B")
+    update_header_color(ws_kwd, "green", "A")
     update_header_color(ws_sites, "green", "B")
     update_header_color(ws_log, "green", "E")
     update_header_color(ws_decisions, "green", "E")
