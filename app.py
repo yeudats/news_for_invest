@@ -13,6 +13,7 @@ import pytz
 from urllib.parse import quote, urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
+import cloudscraper # ספרייה לעקיפת חסימות 403
 
 # --- הגדרות ---
 load_dotenv()
@@ -21,15 +22,18 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC_env")
 SHEET_NAME = os.environ.get("SHEET_NAME_env")
 SHEET_LINK = os.environ.get("SHEET_LINK_env")
 
-# אין צורך ב-GOOGLE_API_KEY יותר עבור הניתוח
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
-}
+# הגדרת סקרייפר לעקיפת חסימות
+scraper = cloudscraper.create_scraper(
+    browser={
+        'browser': 'chrome',
+        'platform': 'windows',
+        'desktop': True
+    }
+)
 
 IL_TIMEZONE = pytz.timezone('Asia/Jerusalem')
 
-# --- מילון סנטימנט פיננסי (לב המערכת החדשה) ---
+# --- מילון סנטימנט פיננסי ---
 POSITIVE_KEYWORDS = [
     # Hebrew
     "זינוק", "מזנקת", "מזנק", "עליות", "עלה", "רווח", "שיא", "חיובי", "צמיחה", "הצלחה", 
@@ -125,9 +129,6 @@ def get_sheet_client():
         creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     return gspread.authorize(creds)
 
-def contains_hebrew(text):
-    return any("\u0590" <= c <= "\u05FF" for c in text)
-
 def update_header_color(worksheet, color_type, header_length):
     color = {'red': 1.0, 'green': 0.8, 'blue': 0.8} if color_type == "red" else {'red': 0.8, 'green': 1.0, 'blue': 0.8}
     try:
@@ -136,12 +137,14 @@ def update_header_color(worksheet, color_type, header_length):
 
 def check_keyword_in_article_body(article_url, keywords):
     try:
-        response = requests.get(article_url, headers=HEADERS, timeout=5)
+        # שימוש ב-scraper במקום requests
+        response = scraper.get(article_url, timeout=10)
         if response.status_code != 200: return False, ""
         text = BeautifulSoup(response.content, 'html.parser').get_text(" ", strip=True).lower()
-        for he, en in keywords:
-            if (he and he.lower() in text) or (en and en.lower() in text):
-                return True, (he if he else en)
+        
+        for kw in keywords:
+            if kw.lower() in text:
+                return True, kw
     except: pass
     return False, ""
 
@@ -151,6 +154,7 @@ def scrape_single_site(site_data, keywords):
     status = "OK"
     try:
         rss_url = url
+        # ניסיונות זיהוי RSS נפוצים
         if not "xml" in url and not "rss" in url:
             if "ynet" in url: rss_url = "https://www.ynet.co.il/Integration/StoryRss2.xml"
             elif "globes" in url: rss_url = "https://www.globes.co.il/webservice/rss/rss.aspx?BID=2"
@@ -158,34 +162,44 @@ def scrape_single_site(site_data, keywords):
             elif "themarker" in url: rss_url = "https://www.themarker.com/srv/tm-market-rss"
             elif "bizportal" in url: rss_url = "https://www.bizportal.co.il/forumpages/rss/general"
 
-        response = requests.get(rss_url, headers=HEADERS, timeout=10)
+        # שימוש ב-scraper כדי לעקוף 403
+        response = scraper.get(rss_url, timeout=15)
         
         if response.status_code != 200:
             return [], f"Error {response.status_code}", row_idx
 
         current_time_str = get_il_time()
+        is_rss = "xml" in response.headers.get('Content-Type', '') or rss_url.endswith('xml')
 
-        if "xml" in response.headers.get('Content-Type', '') or rss_url.endswith('xml'):
+        if is_rss:
             feed = feedparser.parse(response.content)
             if not feed.entries: status = "No RSS Entries"
             for entry in feed.entries[:30]:
                 t, l = entry.title, entry.link
-                match, kw = False, ""
-                for he, en in keywords:
-                    if (he and he.lower() in t.lower()) or (en and en.lower() in t.lower()):
-                        match, kw = True, (he if he else en); break
-                if not match: match, kw = check_keyword_in_article_body(l, keywords)
+                match, matched_kw = False, ""
+                
+                # בדיקה בכותרת
+                for kw in keywords:
+                    if kw.lower() in t.lower():
+                        match, matched_kw = True, kw
+                        break
+                
+                # בדיקה בגוף הכתבה
+                if not match: 
+                    match, matched_kw = check_keyword_in_article_body(l, keywords)
+                
                 if match:
                     site_name = extract_site_name(url)
                     found.append({
                         'Date': current_time_str,
-                        'Keyword': kw, 
+                        'Keyword': matched_kw, 
                         'Article URL': l, 
                         'Site URL': site_name, 
                         'Title': t,
                         'Is_User_Site': True
                     })
         else:
+            # HTML רגיל
             soup = BeautifulSoup(response.content, 'html.parser')
             links = soup.find_all('a', href=True)[:30]
             if not links: status = "No Links Found"
@@ -193,11 +207,13 @@ def scrape_single_site(site_data, keywords):
                 t = a.get_text(" ", strip=True)
                 l = urljoin(url, a['href'])
                 if len(t) < 10: continue
-                for he, en in keywords:
-                    if (he and he.lower() in t.lower()) or (en and en.lower() in t.lower()):
+                
+                # לולאה פשוטה על רשימת המילים
+                for kw in keywords:
+                    if kw.lower() in t.lower():
                         found.append({
                             'Date': current_time_str,
-                            'Keyword': he if he else en,
+                            'Keyword': kw,
                             'Article URL': l,
                             'Site URL': extract_site_name(url),
                             'Title': t,
@@ -212,54 +228,43 @@ def scrape_single_site(site_data, keywords):
 
     return found, status, row_idx
 
-# --- פונקציית ניתוח לוגי (מחליפה את ה-AI) ---
+# --- מנוע לוגי (ללא שינוי) ---
 def analyze_sentiment_logic(grouped_articles):
     results = {}
     
     for kw, articles in grouped_articles.items():
         score = 0
         reasons = []
-        
-        # ניתוח רק של 10 הכתבות האחרונות כדי לשמור על רלוונטיות
         relevant_articles = articles[:10]
         
         for article in relevant_articles:
             title = article['Title'].lower()
-            
-            # בדיקת מילים חיוביות
             for word in POSITIVE_KEYWORDS:
                 if word in title:
                     score += 1
-                    # שומר דוגמה לסיבה (רק פעם אחת למילה)
-                    if word not in str(reasons):
-                        reasons.append(f"{word}+")
-            
-            # בדיקת מילים שליליות
+                    if word not in str(reasons): reasons.append(f"{word}+")
             for word in NEGATIVE_KEYWORDS:
                 if word in title:
                     score -= 1
-                    if word not in str(reasons):
-                        reasons.append(f"{word}-")
+                    if word not in str(reasons): reasons.append(f"{word}-")
 
-        # קביעת המלצה על סמך הציון המשוקלל
         recommendation = "לעמוד"
         sentiment_he = "מעורב/ללא כיוון ברור"
         
         if score >= 3:
             recommendation = "לקנות בחוזקה"
-            sentiment_he = "חיובי מאוד (זינוקים/רווחים)"
+            sentiment_he = "חיובי מאוד"
         elif score >= 1:
             recommendation = "לקנות"
-            sentiment_he = "חיובי (נטייה לעליות)"
+            sentiment_he = "חיובי"
         elif score <= -3:
             recommendation = "למכור בחוזקה"
-            sentiment_he = "שלילי מאוד (קריסה/הפסדים)"
+            sentiment_he = "שלילי מאוד"
         elif score <= -1:
             recommendation = "למכור"
-            sentiment_he = "שלילי (נטייה לירידות)"
+            sentiment_he = "שלילי"
             
-        explanation = f"ציון סנטימנט: {score}. מילים שזוהו: {', '.join(reasons[:5])}"
-        if not reasons: explanation = "לא נמצאו מילות מפתח מובהקות בכותרות"
+        explanation = f"ציון: {score}. מילים: {', '.join(reasons[:5])}" if reasons else "לא נמצאו מילות מפתח מובהקות"
 
         results[kw] = {
             "recommendation": recommendation,
@@ -270,7 +275,7 @@ def analyze_sentiment_logic(grouped_articles):
     return results
 
 def background_process():
-    print("Starting process (Logic Based Mode)...")
+    print("Starting process (Updated Single-Lang Mode)...")
     client = get_sheet_client()
     sh = client.open(SHEET_NAME)
     
@@ -289,8 +294,21 @@ def background_process():
     update_header_color(ws_log, "red", "E")
     update_header_color(ws_decisions, "red", "E")
 
-    # --- 1. טעינת היסטוריה ---
-    print("Loading history...")
+    # --- 1. טעינת מילות מפתח (פשוטה, ללא תרגום) ---
+    print("Loading keywords...")
+    k_vals = ws_kwd.get_all_values()
+    keywords = []
+    # קריאת עמודה A בלבד, החל משורה 2
+    for row in k_vals[1:]:
+        if row and row[0].strip():
+            keywords.append(row[0].strip())
+    
+    # הסרת כפילויות
+    keywords = list(set(keywords))
+    print(f"Keywords to search: {keywords}")
+
+    # --- 2. טעינת היסטוריה וניקוי מילים שנמחקו ---
+    print("Loading history & Cleaning deleted keywords...")
     existing_data = ws_log.get_all_values()
     df_old = pd.DataFrame()
     col_map = {"תאריך ושעה": "Date", "מילת מפתח": "Keyword", "קישור לכתבה": "Article URL", "שם האתר": "Site URL", "כותרת": "Title"}
@@ -305,41 +323,20 @@ def background_process():
             needed = list(col_map.values())
             if all(c in temp_df.columns for c in needed):
                 df_old = temp_df[needed].copy()
+                
+                # --- סינון: השאר רק שורות שהמילה שלהן קיימת ברשימה החדשה ---
+                before_count = len(df_old)
+                df_old = df_old[df_old['Keyword'].isin(keywords)]
+                print(f"Removed {before_count - len(df_old)} rows of deleted keywords.")
+
                 df_old['normalized_url'] = df_old['Article URL'].apply(normalize_url)
                 for _, row in df_old.iterrows():
                     url_to_original_date[row['normalized_url']] = row['Date']
 
     old_urls_set = set(df_old['normalized_url'].tolist()) if not df_old.empty else set()
 
-    # --- 2. עדכון מילות מפתח ---
-    k_vals = ws_kwd.get_all_values()
-    keywords = []
-    updates = []
-    trans_en = GoogleTranslator(source='auto', target='en')
-    trans_he = GoogleTranslator(source='auto', target='iw')
-
-    for i, row in enumerate(k_vals[1:], 2):
-        val_a = row[0].strip() if len(row) > 0 else ""
-        val_b = row[1].strip() if len(row) > 1 else ""
-        if not val_a and not val_b: continue
-        
-        final_he, final_en = "", ""
-        if contains_hebrew(val_a): final_he = val_a
-        elif val_a: final_en = val_a
-        if contains_hebrew(val_b): final_he = val_b
-        elif val_b: final_en = val_b
-        if final_he and not final_en: final_en = trans_en.translate(final_he)
-        elif final_en and not final_he:
-            t = trans_he.translate(final_en)
-            final_he = t if t.lower() != final_en.lower() else final_en
-
-        keywords.append((final_he, final_en))
-        if val_a != final_he or val_b != final_en:
-            updates.append({'range': f'A{i}:B{i}', 'values': [[final_he, final_en]]})
-    if updates: ws_kwd.batch_update(updates)
-
-    # --- 3. סריקה חדשה ---
-    print(f"Scraping sites for {len(keywords)} keywords...")
+    # --- 3. סריקה חדשה (שימוש ב-Scraper) ---
+    print(f"Scraping sites...")
     new_articles = []
     priority_sites_raw = [r[0] for r in ws_sites.get_all_values()[1:] if r and r[0].startswith('http')]
     user_domains = {extract_domain_name(url) for url in priority_sites_raw}
@@ -354,28 +351,29 @@ def background_process():
             new_articles.extend(arts)
             site_statuses[ridx] = status
     
+    # עדכון סטטוסים בגיליון אתרים
     if site_statuses:
         status_updates = []
         for ridx, stat in site_statuses.items():
             status_updates.append({'range': f'B{ridx}', 'values': [[stat]]})
         try: ws_sites.batch_update(status_updates)
-        except Exception as e: print(f"Status update failed: {e}")
+        except: pass
 
-    # Google News Loop
+    # Google News Loop (פשוט יותר - לפי המילה המדויקת)
     cur_time = get_il_time()
+    # נחפש גם באזור US וגם ב-IL כדי לכסות את כל האפשרויות, עם המילה המדויקת
     for loc in [{'l': 'en', 'g': 'US', 'c': 'US:en', 'lbl': 'Global'}, 
                 {'l': 'he', 'g': 'IL', 'c': 'IL:he', 'lbl': 'Local'}]:
-        for he, en in keywords:
-            q = en if loc['l'] == 'en' else he
+        for kw in keywords:
             try:
-                rss = f"https://news.google.com/rss/search?q={quote(q)}&hl={loc['l']}&gl={loc['g']}&ceid={loc['c']}"
+                rss = f"https://news.google.com/rss/search?q={quote(kw)}&hl={loc['l']}&gl={loc['g']}&ceid={loc['c']}"
                 feed = feedparser.parse(rss)
                 for entry in feed.entries[:10]:
                     real_source = extract_site_name(entry.link, entry.title, is_google_news=True)
                     clean_title_text = clean_title_google_news(entry.title)
                     new_articles.append({
                         'Date': cur_time, 
-                        'Keyword': he if he else en,
+                        'Keyword': kw,
                         'Article URL': entry.link, 
                         'Site URL': real_source,
                         'Title': clean_title_text,
@@ -388,7 +386,7 @@ def background_process():
     df_new = pd.DataFrame(new_articles)
     if not df_new.empty:
         df_new['normalized_url'] = df_new['Article URL'].apply(normalize_url)
-        # תרגום כותרות
+        # תרגום כותרות לאנגלית לעברית (אופציונלי - לנוחות המשתמש)
         translator = GoogleTranslator(source='en', target='iw')
         for idx, row in df_new.iterrows():
              if any(c.isalpha() and c.isascii() for c in row['Title']):
@@ -422,7 +420,7 @@ def background_process():
         for kw, group in df_combined.groupby("Keyword"):
             grouped_for_logic[kw] = group[['Title', 'Site URL']].to_dict('records')
 
-    # --- 5. הפעלת מנוע לוגי (ללא AI) ---
+    # --- 5. הפעלת מנוע לוגי ---
     if grouped_for_logic:
         print("Analyzing sentiment using logic rules...")
         analysis_result = analyze_sentiment_logic(grouped_for_logic)
@@ -467,7 +465,7 @@ def background_process():
     update_header_color(ws_sites, "green", "B")
     update_header_color(ws_log, "green", "E")
     update_header_color(ws_decisions, "green", "E")
-    print("Done (Logic Mode).")
+    print("Done (Single-Lang Mode).")
 
 if __name__ == "__main__":
     background_process()
